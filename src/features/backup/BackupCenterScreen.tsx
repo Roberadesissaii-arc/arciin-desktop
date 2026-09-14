@@ -110,14 +110,21 @@ export function BackupCenterScreen({
   }
 
   const status = state?.status
-  const roots = (state?.roots ?? []).filter((root) => root.enabled)
-  // Folders this computer protected before backup, or they, were switched off.
-  // The server still holds their files; resuming one reuses the same root
-  // rather than building a second tree beside it.
-  const dormant = (state?.roots ?? []).filter((root) => !root.enabled)
+  // One list, protected folders first.
+  //
+  // A folder that was switched off is still one of this computer's folders —
+  // the server holds its files and resuming it reuses the same root — so it
+  // belongs in the same box, carrying its state in its own row. Giving it a
+  // box of its own is what stopped the screen fitting and brought back the
+  // page-length scrollbar that bounding these lists was meant to remove.
+  const all = state?.roots ?? []
+  const roots = [
+    ...all.filter((root) => root.enabled),
+    ...all.filter((root) => !root.enabled),
+  ]
   // A known folder already on the list must not be offered a second time —
-  // including a dormant one, which has its own Resume control below.
-  const listedKinds = new Set((state?.roots ?? []).map((root) => root.kind))
+  // including a switched-off one, which has its own Resume control in place.
+  const listedKinds = new Set(all.map((root) => root.kind))
   const available = known.filter((folder) => !listedKinds.has(folder.kind))
 
   // Two lists, two boxes, scrolling independently on purpose. Sharing one
@@ -128,8 +135,6 @@ export function BackupCenterScreen({
   const protectedScroll = useScrollHint<HTMLUListElement>(roots.length)
   const availableCap = useVisibleRowCap(available.length, 0)
   const availableScroll = useScrollHint<HTMLUListElement>(available.length)
-  const dormantCap = useVisibleRowCap(dormant.length, 0)
-  const dormantScroll = useScrollHint<HTMLUListElement>(dormant.length)
 
   // Backup is off server-side. A different screen, not a disabled version of
   // this one: none of the controls below mean anything until it is back on,
@@ -174,16 +179,15 @@ export function BackupCenterScreen({
       {status?.lastError ? <Message>{status.lastError}</Message> : null}
       {error ? <Message>{error.message}</Message> : null}
 
-      {/*
-        Everything that varies in height lives in here, and nothing else does.
-        The controls below keep their place whether this computer protects one
-        folder or twenty, and whether or not there is anything to resume.
-      */}
-      <div className="backup-center__sections">
       <section>
         <div className="row row--between" style={{ marginBottom: 6 }}>
+          {/*
+            Not "Protected folders" any more: the list can hold folders that
+            are switched off, and a heading that called those protected would
+            be wrong in the one place people look to check.
+          */}
           <p className="section-label" style={{ margin: 0 }}>
-            Protected folders
+            Your folders
           </p>
           <LinkButton
             onClick={() =>
@@ -230,10 +234,21 @@ export function BackupCenterScreen({
                     {root.localPath}
                   </span>
                   <span className="folder__meta">
-                    {formatCount(root.fileCount)} files &middot;{" "}
-                    {formatBytes(root.bytesSynced)}
-                    {root.pending > 0 ? ` · ${formatCount(root.pending)} pending` : ""}
-                    {root.failed > 0 ? ` · ${formatCount(root.failed)} failed` : ""}
+                    {root.enabled ? (
+                      <>
+                        {formatCount(root.fileCount)} files &middot;{" "}
+                        {formatBytes(root.bytesSynced)}
+                        {root.pending > 0
+                          ? ` · ${formatCount(root.pending)} pending`
+                          : ""}
+                        {root.failed > 0 ? ` · ${formatCount(root.failed)} failed` : ""}
+                      </>
+                    ) : (
+                      // What is actually on the server, per folder. A blanket
+                      // "still stored on your server" would be a lie for a
+                      // folder switched off before anything uploaded.
+                      <>Not protected &middot; {storedSummary(root)}</>
+                    )}
                   </span>
                 </span>
                 <span className="row" style={{ gap: 4 }}>
@@ -243,13 +258,23 @@ export function BackupCenterScreen({
                   >
                     <FolderOpen size={13} aria-hidden />
                   </LinkButton>
-                  <LinkButton
-                    onClick={() => setRemoving(root)}
-                    title="Stop backing up this folder"
-                    disabled={busy}
-                  >
-                    <X size={13} aria-hidden />
-                  </LinkButton>
+                  {root.enabled ? (
+                    <LinkButton
+                      onClick={() => setRemoving(root)}
+                      title="Stop backing up this folder"
+                      disabled={busy}
+                    >
+                      <X size={13} aria-hidden />
+                    </LinkButton>
+                  ) : (
+                    <LinkButton
+                      onClick={() => void run(() => ipc.backupResumeRoot(root.id))}
+                      title="Protect this folder again — the same folder, not a second copy"
+                      disabled={busy}
+                    >
+                      <RotateCcw size={13} aria-hidden />
+                    </LinkButton>
+                  )}
                 </span>
               </div>
             </li>
@@ -264,65 +289,6 @@ export function BackupCenterScreen({
           </p>
         ) : null}
       </section>
-
-      {dormant.length > 0 ? (
-        <section>
-          <p className="section-label">Not currently protected</p>
-          <p style={{ margin: "0 0 6px", fontSize: 12, color: "var(--text-secondary)" }}>
-            Resuming one picks up where it left off &mdash; it is the same
-            folder, not a second copy.
-          </p>
-          <div className="listbox">
-            <ul
-              ref={(node) => {
-                dormantCap.listRef.current = node
-                dormantScroll.ref.current = node
-              }}
-              className="folders scroll-area listbox__list"
-              style={
-                dormantCap.maxHeight
-                  ? ({ "--folders-max": dormantCap.maxHeight } as React.CSSProperties)
-                  : undefined
-              }
-            >
-              {dormant.map((root) => (
-                <li key={root.id}>
-                  <button
-                    type="button"
-                    className="folder"
-                    disabled={busy}
-                    onClick={() => void run(() => ipc.backupResumeRoot(root.id))}
-                  >
-                    <span className="folder__icon" aria-hidden>
-                      <FolderClosed size={16} />
-                    </span>
-                    <span className="folder__text">
-                      <span className="folder__name">{root.displayName}</span>
-                      <span className="folder__path" title={root.localPath}>
-                        {root.localPath}
-                      </span>
-                      {/*
-                        What is actually on the server, per folder. A blanket
-                        "still stored on your server" would be a lie for a
-                        folder that was switched off before anything uploaded,
-                        and this list is exactly where somebody checks.
-                      */}
-                      <span className="folder__meta">{storedSummary(root)}</span>
-                    </span>
-                    <span className="btn-link btn-link--accent" aria-hidden>
-                      <span className="row" style={{ gap: 5 }}>
-                        <RotateCcw size={13} />
-                        Resume protection
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <ScrollHint visible={dormantScroll.hasMore} floating />
-          </div>
-        </section>
-      ) : null}
 
       {available.length > 0 ? (
         <section>
@@ -371,8 +337,6 @@ export function BackupCenterScreen({
           </div>
         </section>
       ) : null}
-
-      </div>
 
       {removing ? (
         <div className="card stack stack--tight">

@@ -967,56 +967,16 @@
 
 
 /*
- * The folder sections, and only them.
+ * One container per list, and the page itself never scrolls.
  *
- * Everything else in this screen has a fixed place: the title and the storage
- * bar at the top, the Pause/Done row, Stop Computer Backup and the privacy
- * note at the bottom. What varies is how many *sections* of folders there are
- * — protected, not currently protected, still available — and a third section
- * appearing is what walked the buttons off the bottom of the window.
- *
- * So the sections get the leftover height and scroll within it. Each list
- * inside still shows two rows and scrolls on its own; this scrolls between
- * the lists, which is a different question and needs its own answer.
- *
- * `min-height: 0` is what allows a flex child to be shorter than its content
- * and scroll at all. No pixel floor: when the fixed parts turn out taller
- * than expected, a floor here is what pushes content back out of the window.
+ * There is no outer scrolling region here on purpose. An earlier attempt gave
+ * the folder sections their own scrollbar so a third section would fit; that
+ * put a second, page-length scrollbar next to the per-list ones and made the
+ * whole screen scroll, which is exactly what bounding the lists was for. The
+ * answer was to stop adding a third box: folders that are not currently
+ * protected are rows in the same list as the protected ones, not a list of
+ * their own.
  */
-.backup-center__sections {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  /* Room for the scrollbar, so it never sits on top of a row's controls. */
-  padding-right: 2px;
-}
-
-/* The sections themselves keep their size; the column above absorbs the
-   shortfall. Without this they shrink instead, and rows overlap again. */
-.backup-center__sections > * {
-  flex-shrink: 0;
-}
-
-/*
- * Inside this region, a list that has nothing left to scroll hands the wheel
- * on to the region.
- *
- * `.scroll-area` contains overscroll so that flicking to the end of a list
- * cannot scroll the *window* behind it. That was the right answer when the
- * window was what sat behind. It no longer is: the sections region is, and
- * containing the scroll here means the pointer resting on a folder row — the
- * most likely place for it to be — traps the wheel in a list showing all two
- * of its rows, and the sections below cannot be reached at all.
- *
- * Chaining only starts once the inner list has genuinely run out, so the two
- * lists still scroll independently, which is the point of their being two.
- */
-.backup-center__sections .scroll-area {
-  overscroll-behavior: auto;
-}
 
 
 
