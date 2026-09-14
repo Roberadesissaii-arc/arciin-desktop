@@ -172,8 +172,19 @@ export type ProtectedRoot = {
  * Note what is absent: the `arcsync_` credential. No command returns it, and
  * there is no field here it could arrive in.
  */
+/**
+ * Where this computer stands with its server's backup.
+ *
+ * Three states, not two. `NOT_SET_UP` and `DISABLED` used to look identical to
+ * the UI, which is what made stopping backup a one-way door: a computer that
+ * had been switched off was indistinguishable from one that had never been set
+ * up, so the only route back was to start over and build a second tree.
+ */
+export type BackupLifecycle = "NOT_SET_UP" | "ACTIVE" | "DISABLED"
+
 export type BackupState = {
   enabled: boolean
+  lifecycle: BackupLifecycle
   status?: BackupStatus
   roots: ProtectedRoot[]
   activation?: ActivationStage

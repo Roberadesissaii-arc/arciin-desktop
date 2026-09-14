@@ -291,10 +291,16 @@ export const useOnboarding = create<State & Actions>((set, get) => ({
     ensureVisible()
     try {
       const state = await ipc.backupState()
-      // An existing profile — healthy or in error — belongs in the Backup
-      // Center; the error is something to see there, not a reason to set up
-      // again. Only a genuinely absent profile opens the wizard.
-      set({ step: state.enabled ? "backupCenter" : "protectFolders", error: null })
+      // An existing profile belongs in the Backup Center whatever state it is
+      // in — running, in error, or switched off. An error is something to see
+      // there, not a reason to set up again, and backup being *off* is the
+      // case this routing exists for: sending someone who stopped backup back
+      // through first-run setup is how a second tree gets built on the server.
+      // Only a genuinely absent profile opens the wizard.
+      set({
+        step: state.lifecycle === "NOT_SET_UP" ? "protectFolders" : "backupCenter",
+        error: null,
+      })
     } catch {
       set({ step: "protectFolders", error: null })
     }

@@ -326,14 +326,94 @@ pub fn backup_resume(app: AppHandle, state: State<'_, AppState>) -> Result<(), A
 
 /// Turn backup off on this computer.
 ///
-/// Drops the sync credential and the local queue. Local files are untouched
-/// and the computer stays paired.
+/// Server-authoritative: the server disables the profile and revokes the
+/// grant, and only then is the local credential and queue dropped. If the
+/// server refuses, nothing local changes and the error is shown — the two must
+/// not be allowed to disagree about whether this computer is backing up.
+///
+/// The pairing survives, the session survives, local files are untouched and
+/// everything already stored on the server stays. This is not Disconnect.
 #[tauri::command]
-pub fn backup_forget(app: AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+pub async fn backup_forget(app: AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+    let connection = active(&state)?;
+
+    // Authorised by the signed-in person, not by the credential being revoked.
+    let window = app
+        .get_webview_window(connection::ONBOARDING_WINDOW)
+        .ok_or_else(|| from_code("WEBVIEW_BRIDGE_UNAVAILABLE"))?;
+    let session = connection::webview::borrow_user_session(&window, &connection.origin)?
+        .ok_or_else(|| from_code("BACKUP_UNAUTHORIZED"))?;
+
+    state
+        .backup
+        .forget(
+            &app,
+            state.credentials.as_ref(),
+            &connection.server_id,
+            &connection.origin,
+            &session.cookie_header(),
+        )
+        .await
+}
+
+/// Turn backup back on for a computer that was switched off.
+///
+/// Authorised by the signed-in person for the same reason `backup_forget` is:
+/// this issues the credential that stopping revoked, and a revoked grant must
+/// not be able to reinstate itself.
+///
+/// The existing profile is reused, so the computer keeps its identity and its
+/// stored files. Folders come back listed but **not** protected — turning
+/// backup on is a decision about this computer, not a decision to restart
+/// uploading everything it ever protected.
+#[tauri::command]
+pub async fn backup_reenable(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::backup::manager::BackupState, AppError> {
+    let connection = active(&state)?;
+
+    let window = app
+        .get_webview_window(connection::ONBOARDING_WINDOW)
+        .ok_or_else(|| from_code("WEBVIEW_BRIDGE_UNAVAILABLE"))?;
+    let session = connection::webview::borrow_user_session(&window, &connection.origin)?
+        .ok_or_else(|| from_code("BACKUP_UNAUTHORIZED"))?;
+
+    state
+        .backup
+        .reenable(
+            &app,
+            state.credentials.as_ref(),
+            &connection.server_id,
+            &connection.origin,
+            &session.cookie_header(),
+        )
+        .await
+}
+
+/// Protect a folder again that was switched off.
+///
+/// Server-authoritative and grant-authorised: the root is re-enabled on the
+/// server first, and only then does this computer start scanning it. It is the
+/// same root it always was, so nothing is duplicated on the server and the
+/// files already stored under it are recognised rather than re-sent.
+#[tauri::command]
+pub async fn backup_resume_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_id: String,
+) -> Result<crate::backup::manager::BackupState, AppError> {
     let connection = active(&state)?;
     state
         .backup
-        .forget(&app, state.credentials.as_ref(), &connection.server_id)
+        .resume_root(
+            &app,
+            state.credentials.as_ref(),
+            &connection.server_id,
+            &connection.origin,
+            &root_id,
+        )
+        .await
 }
 
 /// Close the native backup surface and return to the running Arciin window.
@@ -348,10 +428,13 @@ pub fn close_backup_ui(app: AppHandle) {
 
 /// Stop protecting one folder.
 ///
-/// Keeps the profile, the Device pairing, every other folder, and the copy
-/// already on the server. Nothing on this PC is touched.
+/// Server-authoritative: the root is disabled on the server first, and the
+/// local state follows only once that succeeds. Keeps the profile, the
+/// pairing, every other folder, and the copy already stored. Nothing on this
+/// PC is touched, and the root is disabled rather than deleted so re-adding
+/// the same folder reactivates it instead of building a second tree.
 #[tauri::command]
-pub fn backup_remove_root(
+pub async fn backup_remove_root(
     app: AppHandle,
     state: State<'_, AppState>,
     root_id: String,
@@ -359,7 +442,14 @@ pub fn backup_remove_root(
     let connection = active(&state)?;
     state
         .backup
-        .remove_root(&app, &connection.server_id, &root_id)
+        .remove_root(
+            &app,
+            state.credentials.as_ref(),
+            &connection.server_id,
+            &connection.origin,
+            &root_id,
+        )
+        .await
 }
 
 /// Open a protected folder in File Explorer.

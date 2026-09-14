@@ -46,6 +46,64 @@ Device management — listing, generating a PIN, renaming, revoking — is
 deliberately **not** implemented here. Those endpoints require a signed-in
 OWNER/ADMIN session and belong to the server's own Settings → Devices page.
 
+## Backup lifecycle
+
+Backup is **server-authoritative**. The local SQLite database is a cache of the
+upload queue; it is not the authority on whether this computer is allowed to
+back up, because that can be changed from another device while this app is
+closed.
+
+Two authorities, deliberately separate:
+
+| Method | Path | Auth | Used for |
+| --- | --- | --- | --- |
+| `POST` | `/api/backup/profiles` | user session | Enable backup, create/upsert roots |
+| `POST` | `/api/backup/profiles/:id/disable` | user session | Turn backup off |
+| `POST` | `/api/backup/profiles/:id/enable` | user session | Turn backup back on |
+| `GET` | `/api/backup/me` | `ArciinSync` grant | Reconcile on launch |
+| `POST` | `/api/backup/roots/:id/disable` | grant *or* session | Stop protecting a folder |
+| `POST` | `/api/backup/roots/:id/enable` | grant *or* session | Protect it again |
+
+The profile-level calls take the signed-in user's session rather than the sync
+grant, and that is the point: the grant is exactly what disabling revokes and
+what enabling issues, so a credential must not be able to revoke or resurrect
+its own authority.
+
+What the server does on each, which the client depends on:
+
+- **Disable** revokes every grant for the profile and marks every `SyncRoot`
+  `DISABLED`. The `Device` stays paired, the user stays signed in, and every
+  file already stored stays where it is.
+- **Enable** reuses the existing profile — same id, same device folder — and
+  always issues a fresh credential because the profile was disabled. Roots sent
+  in the body are upserted by `sourcePathIdentifier` and become `PROTECTED`;
+  roots left out stay `DISABLED`. The client deliberately sends none, so
+  turning backup back on never restarts uploading a folder somebody switched
+  off.
+- **Root enable** refuses with `BACKUP_DISABLED` while the profile is off, so
+  the two can never be re-enabled in the wrong order.
+
+Because roots are upserted by `sourcePathIdentifier` and re-enabled by id, a
+folder that is removed and added again is the *same* `SyncRoot`. Nothing is
+duplicated in the computer's hierarchy, and the files already stored under it
+are recognised rather than re-sent.
+
+### Reconciliation on launch
+
+Before resuming, the client asks `GET /api/backup/me` with the grant it holds:
+
+- `BACKUP_DISABLED`, `BACKUP_CREDENTIAL_INVALID` or `BACKUP_NOT_FOUND` — backup
+  is off. The credential is dropped and the local queue cleared, but the
+  profile and folder list are **kept**, because they are what the offer to turn
+  backup back on is made of.
+- A trust-lost code — a different event entirely, handled by the device
+  watchdog, not here.
+- Any other failure, including no answer at all — unknown, not "no". Being
+  unable to ask is not being told no, and tearing down a working setup because
+  the Wi-Fi is down would be its own bug.
+- Success — each local root is checked against the server's, and any the server
+  no longer protects stops being scanned here.
+
 ## Protocol version handling
 
 `ARCIIN_DEVICE_PROTOCOL_VERSION = 1`.

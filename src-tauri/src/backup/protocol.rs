@@ -240,12 +240,15 @@ pub fn friendly_backup_error(code: &str) -> Option<(&'static str, bool)> {
             "This computer is no longer paired with this Arciin server.",
             false,
         ),
-        "BACKUP_FORBIDDEN" => (
-            "This account can't back up to this computer's profile.",
-            false,
-        ),
-        "BACKUP_DISABLED" => ("Computer backup was turned off for this computer.", false),
-        "BACKUP_READ_ONLY" => ("Arciin won't accept that change from this computer.", false),
+        // `BACKUP_DISABLED`, `BACKUP_FORBIDDEN` and `BACKUP_READ_ONLY` are
+        // deliberately absent. They are lifecycle answers — backup is off,
+        // this account may not manage it, the server is not taking uploads —
+        // and their copy lives with the rest of the lifecycle codes in
+        // `crate::error`, which says how to get out of each. Owning them here
+        // too meant the same situation read two different ways depending on
+        // whether the client or the server noticed it, and the version here
+        // was the dead-end one: it said backup was off without saying that
+        // turning it back on is a thing you can do.
         "PATH_TRAVERSAL" => ("That file's location couldn't be sent safely.", false),
         "PATH_INVALID" => (
             "That file's name or location isn't valid for Arciin.",

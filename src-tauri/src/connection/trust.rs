@@ -95,7 +95,7 @@ pub fn handle_device_revoked(app: &AppHandle, server_id: &str) {
     // 2. Drop the backup grant for this server only. Local files stay.
     if let Err(err) = state
         .backup
-        .forget(app, state.credentials.as_ref(), server_id)
+        .forget_locally(app, state.credentials.as_ref(), server_id)
     {
         tracing::warn!(code = %err.code, "backup state could not be cleared");
     }

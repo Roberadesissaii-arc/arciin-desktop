@@ -30,7 +30,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::AppError;
 
 /// Bumped whenever the schema changes shape. Migration is forward-only.
-const SCHEMA_VERSION: i64 = 1;
+// 2 added `profiles.status`: backup can now be turned off server-side while
+// this computer stays paired, and the row has to outlive that so the folders
+// can be offered back.
+const SCHEMA_VERSION: i64 = 2;
 
 /// What the engine intends to do, or has done, with one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +133,12 @@ pub struct Profile {
     pub device_id: String,
     pub user_id: String,
     pub paused: bool,
+    /// Whether the server still has backup switched on for this computer.
+    ///
+    /// A disabled profile is kept rather than deleted: the folders are still
+    /// stored on the server, and the only way to offer them back is to
+    /// remember which ones they were.
+    pub enabled: bool,
 }
 
 /// SQLite-backed sync state, serialised behind one connection.
@@ -185,6 +194,7 @@ impl SyncStore {
                 device_id   TEXT NOT NULL,
                 user_id     TEXT NOT NULL,
                 paused      INTEGER NOT NULL DEFAULT 0,
+                enabled     INTEGER NOT NULL DEFAULT 1,
                 created_at  TEXT NOT NULL
             );
 
@@ -229,6 +239,21 @@ impl SyncStore {
             AppError::internal("Backup state could not be prepared.")
         })?;
 
+        // Databases created at version 1 have the tables but not the column.
+        // `CREATE TABLE IF NOT EXISTS` above is a no-op for them, so the
+        // column has to be added separately.
+        let has_enabled = conn.prepare("SELECT enabled FROM profiles LIMIT 0").is_ok();
+        if !has_enabled {
+            conn.execute_batch(
+                "ALTER TABLE profiles ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+            )
+            .map_err(|err| {
+                tracing::error!(error = %err, "sync schema could not be upgraded");
+                AppError::internal("Backup state could not be prepared.")
+            })?;
+            tracing::info!("sync schema upgraded: profiles.enabled added");
+        }
+
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .ok();
         tracing::info!(version = SCHEMA_VERSION, "sync schema ready");
@@ -240,18 +265,21 @@ impl SyncStore {
     pub fn save_profile(&self, profile: &Profile) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO profiles (server_id, profile_id, device_id, user_id, paused, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO profiles
+                (server_id, profile_id, device_id, user_id, paused, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(server_id) DO UPDATE SET
                 profile_id = excluded.profile_id,
                 device_id  = excluded.device_id,
-                user_id    = excluded.user_id",
+                user_id    = excluded.user_id,
+                enabled    = excluded.enabled",
             params![
                 profile.server_id,
                 profile.profile_id,
                 profile.device_id,
                 profile.user_id,
                 profile.paused as i64,
+                profile.enabled as i64,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
@@ -262,7 +290,7 @@ impl SyncStore {
     pub fn profile(&self, server_id: &str) -> Result<Option<Profile>, AppError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT server_id, profile_id, device_id, user_id, paused
+            "SELECT server_id, profile_id, device_id, user_id, paused, enabled
              FROM profiles WHERE server_id = ?1",
             params![server_id],
             |row| {
@@ -272,6 +300,7 @@ impl SyncStore {
                     device_id: row.get(2)?,
                     user_id: row.get(3)?,
                     paused: row.get::<_, i64>(4)? != 0,
+                    enabled: row.get::<_, i64>(5)? != 0,
                 })
             },
         )
@@ -284,6 +313,49 @@ impl SyncStore {
         conn.execute(
             "UPDATE profiles SET paused = ?2 WHERE server_id = ?1",
             params![server_id, paused as i64],
+        )
+        .map_err(map_write)?;
+        Ok(())
+    }
+
+    /// Record that the server has turned backup off for this computer.
+    ///
+    /// The profile row and its roots are kept. Backup being off is a setting,
+    /// not an amnesia: the folders are still stored on the server, and the
+    /// only way to offer them back is to remember which ones they were.
+    ///
+    /// Outstanding work is dropped, because it is no longer going anywhere.
+    /// Entries already sent are kept, because the server still has them and
+    /// re-enabling must not mean uploading everything a second time.
+    pub fn disable_profile(&self, server_id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM entries
+             WHERE server_id = ?1 AND state IN ('PENDING', 'IN_PROGRESS', 'FAILED')",
+            params![server_id],
+        )
+        .map_err(map_write)?;
+        conn.execute(
+            "UPDATE roots SET enabled = 0 WHERE server_id = ?1",
+            params![server_id],
+        )
+        .map_err(map_write)?;
+        conn.execute(
+            "UPDATE profiles SET enabled = 0, paused = 0 WHERE server_id = ?1",
+            params![server_id],
+        )
+        .map_err(map_write)?;
+        tracing::info!(server_id, "backup marked off for this server");
+        Ok(())
+    }
+
+    /// Record that backup is on again. Roots stay as they are — turning backup
+    /// back on is not the same as re-protecting every folder.
+    pub fn enable_profile(&self, server_id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE profiles SET enabled = 1 WHERE server_id = ?1",
+            params![server_id],
         )
         .map_err(map_write)?;
         Ok(())
@@ -693,6 +765,7 @@ mod tests {
             device_id: "device-1".into(),
             user_id: "user-1".into(),
             paused: false,
+            enabled: true,
         }
     }
 
@@ -1079,5 +1152,276 @@ mod tests {
             );
         }
         drop(dir);
+    }
+    // --- Backup being turned off ----------------------------------------
+    //
+    // The distinction these cover: turning backup off is a *setting*, and
+    // forgetting the server is not. The version this replaces deleted the
+    // profile on stop, so a computer that had been switched off was
+    // indistinguishable from one that had never been set up — the only way
+    // back was first-run setup, which built a second tree on the server
+    // beside the files that were already there.
+
+    fn root(id: &str, name: &str) -> Root {
+        Root {
+            id: id.into(),
+            kind: "CUSTOM".into(),
+            display_name: name.into(),
+            local_path: PathBuf::from(format!(r"D:\Profiles\TestUser\{name}")),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn turning_backup_off_keeps_the_profile() {
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        let loaded = store.profile(SERVER_A).unwrap().expect("profile kept");
+        assert_eq!(loaded.profile_id, "profile-1");
+        assert!(!loaded.enabled, "backup must read as off");
+    }
+
+    #[test]
+    fn turning_backup_off_keeps_the_folders_it_protected() {
+        // They are still stored on the server, and remembering which ones
+        // they were is the whole of the offer to turn backup back on.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        store.save_root(SERVER_A, &root("root-2", "Notes")).unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        let roots = store.roots(SERVER_A).unwrap();
+        assert_eq!(
+            roots.len(),
+            2,
+            "folders must survive backup being turned off"
+        );
+        assert!(
+            roots.iter().all(|r| !r.enabled),
+            "but none of them may still be protected"
+        );
+        assert!(
+            roots.iter().any(|r| r.local_path.ends_with("TestBackup")),
+            "the local path has to survive too, or the folder cannot be resumed"
+        );
+    }
+
+    #[test]
+    fn turning_backup_off_drops_outstanding_work_but_keeps_what_was_sent() {
+        // Queued work is not going anywhere once the grant is revoked, so
+        // keeping it would only overstate what is protected. What was already
+        // sent is a different matter: the server still has it, and re-enabling
+        // must not mean uploading everything a second time.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+
+        let mut sent = entry("sent.txt", "entry-sent");
+        sent.state = SyncState::Synced;
+        store.upsert_entry(SERVER_A, &sent).unwrap();
+        store
+            .upsert_entry(SERVER_A, &entry("queued.txt", "entry-queued"))
+            .unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        assert!(
+            store
+                .entry_by_path(SERVER_A, "root-1", "sent.txt")
+                .unwrap()
+                .is_some(),
+            "a file already on the server must not be forgotten"
+        );
+        assert!(
+            store
+                .entry_by_path(SERVER_A, "root-1", "queued.txt")
+                .unwrap()
+                .is_none(),
+            "queued work must not survive the grant that was going to send it"
+        );
+    }
+
+    #[test]
+    fn a_computer_whose_backup_is_off_survives_a_restart() {
+        // Reopened from disk, because this is exactly the state a launch has
+        // to read correctly: the profile is there but backup is off, and
+        // resuming would be wrong.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = SyncStore::open(dir.path()).unwrap();
+            store.save_profile(&profile(SERVER_A)).unwrap();
+            store
+                .save_root(SERVER_A, &root("root-1", "TestBackup"))
+                .unwrap();
+            store.disable_profile(SERVER_A).unwrap();
+        }
+        let store = SyncStore::open(dir.path()).unwrap();
+        let loaded = store.profile(SERVER_A).unwrap().expect("profile kept");
+        assert!(!loaded.enabled);
+        assert_eq!(store.roots(SERVER_A).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn turning_backup_back_on_does_not_reprotect_every_folder() {
+        // Deliberate. Someone who switched backup off because one enormous
+        // folder was filling the server must not have it start again on its
+        // own; each folder is resumed by hand.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        store.disable_profile(SERVER_A).unwrap();
+
+        store.enable_profile(SERVER_A).unwrap();
+
+        assert!(store.profile(SERVER_A).unwrap().unwrap().enabled);
+        assert!(
+            store.roots(SERVER_A).unwrap().iter().all(|r| !r.enabled),
+            "turning backup on is not the same as protecting every folder again"
+        );
+    }
+
+    #[test]
+    fn resuming_a_folder_keeps_the_root_it_always_was() {
+        // The identity check behind "no duplicate hierarchy": the id and the
+        // local path are unchanged, so the server sees the same SyncRoot and
+        // the files already under it stay where they are.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        let before = store.roots(SERVER_A).unwrap()[0].clone();
+
+        store.disable_profile(SERVER_A).unwrap();
+        store.enable_profile(SERVER_A).unwrap();
+        store.set_root_enabled(SERVER_A, "root-1", true).unwrap();
+
+        let after = store.roots(SERVER_A).unwrap();
+        assert_eq!(after.len(), 1, "resuming must not add a second root");
+        assert_eq!(after[0].id, before.id);
+        assert_eq!(after[0].local_path, before.local_path);
+        assert!(after[0].enabled);
+    }
+
+    #[test]
+    fn one_servers_backup_being_off_leaves_another_alone() {
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store.save_profile(&profile(SERVER_B)).unwrap();
+        store
+            .save_root(SERVER_B, &root("root-b", "TestBackup"))
+            .unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        assert!(store.profile(SERVER_B).unwrap().unwrap().enabled);
+        assert!(store.roots(SERVER_B).unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn revocation_still_erases_everything() {
+        // The other lifecycle, and it must stay different: an unpaired device
+        // has nothing to offer back, so nothing is kept.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+
+        store.forget_server(SERVER_A).unwrap();
+
+        assert!(store.profile(SERVER_A).unwrap().is_none());
+        assert!(store.roots(SERVER_A).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_folder_that_was_never_uploaded_reports_nothing_stored() {
+        // What the "not currently protected" list is built from. A folder can
+        // be switched off before a single file reaches the server — that is
+        // exactly what happened to a Pictures root here once — and reporting
+        // it as stored would overstate what is protected in the one place
+        // somebody goes to check.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "NeverSent"))
+            .unwrap();
+        store
+            .upsert_entry(SERVER_A, &entry("a.txt", "entry-a"))
+            .unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        let (files, pending, failed, bytes) = store.root_progress(SERVER_A, "root-1").unwrap();
+        assert_eq!((files, pending, failed, bytes), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_folder_that_was_uploaded_still_reports_what_it_sent() {
+        // The other half: switching a folder off must not erase the record of
+        // what the server already holds, or resuming it would look like
+        // starting from nothing.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        let mut sent = entry("sent.txt", "entry-sent");
+        sent.state = SyncState::Synced;
+        store.upsert_entry(SERVER_A, &sent).unwrap();
+
+        store.disable_profile(SERVER_A).unwrap();
+
+        let (files, _pending, _failed, bytes) = store.root_progress(SERVER_A, "root-1").unwrap();
+        assert_eq!(files, 1);
+        assert_eq!(bytes, 10);
+    }
+
+    #[test]
+    fn a_database_from_before_this_column_still_opens() {
+        // Version 1 wrote `profiles` without `enabled`. An upgrade that could
+        // not read an existing database would lose someone's whole queue on
+        // first launch after an update, so the column is added in place and
+        // the computers already backing up keep reading as enabled.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("backup-state.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE profiles (
+                     server_id   TEXT PRIMARY KEY,
+                     profile_id  TEXT NOT NULL,
+                     device_id   TEXT NOT NULL,
+                     user_id     TEXT NOT NULL,
+                     paused      INTEGER NOT NULL DEFAULT 0,
+                     created_at  TEXT NOT NULL
+                 );
+                 INSERT INTO profiles VALUES
+                     ('server-old', 'profile-old', 'device-old', 'user-old', 0, '2026-01-01T00:00:00Z');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        let store = SyncStore::open(dir.path()).unwrap();
+        let loaded = store
+            .profile("server-old")
+            .unwrap()
+            .expect("profile survived");
+        assert_eq!(loaded.profile_id, "profile-old");
+        assert!(
+            loaded.enabled,
+            "a computer that was backing up before the upgrade is still backing up"
+        );
     }
 }

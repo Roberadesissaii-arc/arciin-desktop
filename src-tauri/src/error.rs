@@ -128,6 +128,40 @@ pub fn friendly(code: &str) -> (&'static str, bool) {
         "BACKUP_FOLDER_UNAVAILABLE" => ("That folder isn't available on this computer.", false),
         "BACKUP_NO_FOLDERS" => ("Choose at least one folder to protect.", false),
         "BACKUP_ALREADY_STARTING" => ("Backup is already being set up on this computer.", false),
+        // --- Backup lifecycle (server-authoritative) ---
+        //
+        // Each of these is a different situation with a different way out, and
+        // collapsing them into "something went wrong" is how someone ends up
+        // re-pairing a computer when all they needed was to turn backup back
+        // on. In particular: backup being off is not the device being revoked.
+        "BACKUP_DISABLED" => (
+            "Computer Backup is turned off for this computer. Turn it back on to continue.",
+            false,
+        ),
+        "SYNC_ROOT_DISABLED" => (
+            "That folder is no longer being backed up. Add it again to resume.",
+            false,
+        ),
+        "BACKUP_READ_ONLY" => (
+            "Your Arciin server isn't accepting uploads right now.",
+            true,
+        ),
+        "BACKUP_FORBIDDEN" => (
+            "This account isn't allowed to manage backup for this computer.",
+            false,
+        ),
+        "BACKUP_NOT_FOUND" => (
+            "This computer has no backup set up on that Arciin server.",
+            false,
+        ),
+        "BACKUP_ROOT_NOT_FOUND" => (
+            "That protected folder no longer exists on your Arciin server.",
+            false,
+        ),
+        "BACKUP_UNAUTHORIZED" => (
+            "Sign in to Arciin on this computer to manage backup.",
+            false,
+        ),
         "BACKUP_FILE_UNREADABLE" => (
             "Windows wouldn't let Arciin read that file. It will be tried again later.",
             true,

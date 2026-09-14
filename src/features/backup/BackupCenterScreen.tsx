@@ -26,6 +26,7 @@ import {
   FolderPlus,
   Pause,
   Play,
+  RotateCcw,
   ShieldCheck,
   X,
 } from "lucide-react"
@@ -110,9 +111,14 @@ export function BackupCenterScreen({
 
   const status = state?.status
   const roots = (state?.roots ?? []).filter((root) => root.enabled)
-  // A known folder already protected must not be offered a second time.
-  const protectedKinds = new Set(roots.map((root) => root.kind))
-  const available = known.filter((folder) => !protectedKinds.has(folder.kind))
+  // Folders this computer protected before backup, or they, were switched off.
+  // The server still holds their files; resuming one reuses the same root
+  // rather than building a second tree beside it.
+  const dormant = (state?.roots ?? []).filter((root) => !root.enabled)
+  // A known folder already on the list must not be offered a second time —
+  // including a dormant one, which has its own Resume control below.
+  const listedKinds = new Set((state?.roots ?? []).map((root) => root.kind))
+  const available = known.filter((folder) => !listedKinds.has(folder.kind))
 
   // Two lists, two boxes, scrolling independently on purpose. Sharing one
   // region meant reaching a folder in one list dragged the other along with
@@ -122,6 +128,24 @@ export function BackupCenterScreen({
   const protectedScroll = useScrollHint<HTMLUListElement>(roots.length)
   const availableCap = useVisibleRowCap(available.length, 0)
   const availableScroll = useScrollHint<HTMLUListElement>(available.length)
+  const dormantCap = useVisibleRowCap(dormant.length, 0)
+  const dormantScroll = useScrollHint<HTMLUListElement>(dormant.length)
+
+  // Backup is off server-side. A different screen, not a disabled version of
+  // this one: none of the controls below mean anything until it is back on,
+  // and the only honest thing to say is what happened and how to undo it.
+  if (state?.lifecycle === "DISABLED") {
+    return (
+      <BackupOffScreen
+        deviceName={deviceName}
+        folders={state.roots}
+        busy={busy}
+        error={error}
+        onTurnBackOn={() => void run(ipc.backupReenable)}
+        onClose={onClose}
+      />
+    )
+  }
 
   return (
     <div className="backup-center">
@@ -150,6 +174,12 @@ export function BackupCenterScreen({
       {status?.lastError ? <Message>{status.lastError}</Message> : null}
       {error ? <Message>{error.message}</Message> : null}
 
+      {/*
+        Everything that varies in height lives in here, and nothing else does.
+        The controls below keep their place whether this computer protects one
+        folder or twenty, and whether or not there is anything to resume.
+      */}
+      <div className="backup-center__sections">
       <section>
         <div className="row row--between" style={{ marginBottom: 6 }}>
           <p className="section-label" style={{ margin: 0 }}>
@@ -235,6 +265,65 @@ export function BackupCenterScreen({
         ) : null}
       </section>
 
+      {dormant.length > 0 ? (
+        <section>
+          <p className="section-label">Not currently protected</p>
+          <p style={{ margin: "0 0 6px", fontSize: 12, color: "var(--text-secondary)" }}>
+            Resuming one picks up where it left off &mdash; it is the same
+            folder, not a second copy.
+          </p>
+          <div className="listbox">
+            <ul
+              ref={(node) => {
+                dormantCap.listRef.current = node
+                dormantScroll.ref.current = node
+              }}
+              className="folders scroll-area listbox__list"
+              style={
+                dormantCap.maxHeight
+                  ? ({ "--folders-max": dormantCap.maxHeight } as React.CSSProperties)
+                  : undefined
+              }
+            >
+              {dormant.map((root) => (
+                <li key={root.id}>
+                  <button
+                    type="button"
+                    className="folder"
+                    disabled={busy}
+                    onClick={() => void run(() => ipc.backupResumeRoot(root.id))}
+                  >
+                    <span className="folder__icon" aria-hidden>
+                      <FolderClosed size={16} />
+                    </span>
+                    <span className="folder__text">
+                      <span className="folder__name">{root.displayName}</span>
+                      <span className="folder__path" title={root.localPath}>
+                        {root.localPath}
+                      </span>
+                      {/*
+                        What is actually on the server, per folder. A blanket
+                        "still stored on your server" would be a lie for a
+                        folder that was switched off before anything uploaded,
+                        and this list is exactly where somebody checks.
+                      */}
+                      <span className="folder__meta">{storedSummary(root)}</span>
+                    </span>
+                    <span className="btn-link btn-link--accent" aria-hidden>
+                      <span className="row" style={{ gap: 5 }}>
+                        <RotateCcw size={13} />
+                        Resume protection
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <ScrollHint visible={dormantScroll.hasMore} floating />
+          </div>
+        </section>
+      ) : null}
+
       {available.length > 0 ? (
         <section>
           <p className="section-label">Also available on this PC</p>
@@ -282,6 +371,8 @@ export function BackupCenterScreen({
           </div>
         </section>
       ) : null}
+
+      </div>
 
       {removing ? (
         <div className="card stack stack--tight">
@@ -370,6 +461,125 @@ export function BackupCenterScreen({
           </div>
         )}
       </div>
+
+      <p className="privacy-note">
+        <ShieldCheck size={14} aria-hidden />
+        Copied to your own server. Nothing is ever deleted from this PC.
+      </p>
+    </div>
+  )
+}
+
+/**
+ * What this folder actually has on the server, in one phrase.
+ *
+ * Nothing is a real answer and has to be said as one: a folder can be dropped
+ * before a single file reaches the server, and reporting that as "stored"
+ * would overstate what is protected in the one place people go to check.
+ */
+function storedSummary(root: ProtectedRoot): string {
+  if (root.fileCount === 0) return "Nothing backed up yet"
+  return `${formatCount(root.fileCount)} files · ${formatBytes(root.bytesSynced)} on your server`
+}
+
+/**
+ * What a computer whose backup has been turned off is shown.
+ *
+ * The state this replaces had no screen at all: stopping backup deleted the
+ * local profile, so the computer looked like one that had never been set up
+ * and the only route back was first-run setup — which built a second tree
+ * beside the files already on the server. Backup being off is a setting, and a
+ * setting needs somewhere to say so and a way back.
+ *
+ * Three things are worth saying plainly here, because each is a thing people
+ * reasonably fear has happened: the files are still on the server, nothing on
+ * this PC was touched, and the computer is still paired.
+ */
+function BackupOffScreen({
+  deviceName,
+  folders,
+  busy,
+  error,
+  onTurnBackOn,
+  onClose,
+}: {
+  deviceName: string
+  folders: ProtectedRoot[]
+  busy: boolean
+  error: AppError | null
+  onTurnBackOn: () => void
+  onClose: () => void
+}) {
+  return (
+    <div className="backup-center">
+      <div className="row row--between">
+        <div>
+          <h1 className="title" style={{ textAlign: "left", fontSize: 21 }}>
+            Computer Backup
+          </h1>
+          <p style={{ margin: "4px 0 0", fontSize: 12.5, color: "var(--text-secondary)" }}>
+            {deviceName} &middot; backup is off
+          </p>
+        </div>
+      </div>
+
+      <div className="card stack stack--tight">
+        <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
+          <strong>Backup is off for this computer.</strong>
+        </p>
+        <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+          Everything already backed up is <strong>still on your Arciin
+          server</strong> and nothing on this PC was deleted. This computer is
+          still paired &mdash; only the background backup stopped.
+        </p>
+      </div>
+
+      {error ? <Message>{error.message}</Message> : null}
+
+      {folders.length > 0 ? (
+        <section>
+          <p className="section-label">Previously protected</p>
+          <ul className="folders">
+            {folders.map((root) => (
+              <li key={root.id}>
+                <div className="folder folder--loading">
+                  <span className="folder__icon" aria-hidden>
+                    <FolderClosed size={16} />
+                  </span>
+                  <span className="folder__text">
+                    <span className="folder__name">{root.displayName}</span>
+                    <span className="folder__path" title={root.localPath}>
+                      {root.localPath}
+                    </span>
+                    <span className="folder__meta">{storedSummary(root)}</span>
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <div className="row" style={{ gap: 8 }}>
+        <Button compact onClick={onTurnBackOn} disabled={busy}>
+          <ShieldCheck size={14} aria-hidden />
+          {busy ? "Turning on…" : "Turn Backup Back On"}
+        </Button>
+        <Button compact variant="secondary" onClick={onClose}>
+          Done
+        </Button>
+      </div>
+
+      {/*
+        Said here because turning backup on is not the same as protecting every
+        folder again: uploading is resumed folder by folder, deliberately. A
+        computer that switched backup off because a huge folder was filling the
+        server must not have that folder start again on its own.
+      */}
+      <p style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+        Turning backup on doesn&rsquo;t start uploading again on its own.
+        You&rsquo;ll choose which folders to resume.
+      </p>
 
       <p className="privacy-note">
         <ShieldCheck size={14} aria-hidden />

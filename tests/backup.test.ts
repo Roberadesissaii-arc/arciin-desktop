@@ -67,6 +67,7 @@ describe("backup state shape", () => {
     // have to arrive through this type.
     const state: BackupState = {
       enabled: true,
+      lifecycle: "ACTIVE",
       status: {
         health: "SYNCING",
         filesSynced: 12,
@@ -97,10 +98,56 @@ describe("backup state shape", () => {
     }
   })
 
-  it("reports a disabled profile without a status block", () => {
-    const state: BackupState = { enabled: false, roots: [] }
+  it("reports a computer that was never set up without a status block", () => {
+    const state: BackupState = { enabled: false, lifecycle: "NOT_SET_UP", roots: [] }
     expect(state.status).toBeUndefined()
     expect(state.roots).toHaveLength(0)
+  })
+
+  it("keeps the folders of a computer whose backup was turned off", () => {
+    // The whole point of the DISABLED state: the folders are remembered so
+    // they can be offered back. Losing them here is what made stopping backup
+    // a one-way door into first-run setup and a duplicate tree on the server.
+    const state: BackupState = {
+      enabled: false,
+      lifecycle: "DISABLED",
+      roots: [
+        {
+          id: "root-1",
+          kind: "DESKTOP",
+          displayName: "Desktop",
+          enabled: false,
+          localPath: "D:\\Profiles\\TestUser\\Desktop",
+          fileCount: 0,
+          pending: 0,
+          failed: 0,
+          bytesSynced: 0,
+        },
+      ],
+    }
+    expect(state.roots).toHaveLength(1)
+    expect(state.roots[0].enabled).toBe(false)
+  })
+})
+
+describe("which backup screen opens", () => {
+  // Setup and management are different jobs. Sending a computer that has been
+  // set up back through the wizard is how a second tree gets built on the
+  // server, so only a genuinely absent profile may open it.
+  function screenFor(lifecycle: BackupState["lifecycle"]) {
+    return lifecycle === "NOT_SET_UP" ? "protectFolders" : "backupCenter"
+  }
+
+  it("opens setup only when backup has never been set up here", () => {
+    expect(screenFor("NOT_SET_UP")).toBe("protectFolders")
+  })
+
+  it("opens the Backup Center for a computer that is backing up", () => {
+    expect(screenFor("ACTIVE")).toBe("backupCenter")
+  })
+
+  it("opens the Backup Center for a computer whose backup was turned off", () => {
+    expect(screenFor("DISABLED")).toBe("backupCenter")
   })
 })
 

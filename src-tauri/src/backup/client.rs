@@ -184,6 +184,40 @@ impl BackupClient {
         Ok(parsed.data)
     }
 
+    /// Stop protecting one root, on the server.
+    ///
+    /// The server is the authority here. Disabling only locally left the two
+    /// disagreeing: the server kept accepting writes for a root this computer
+    /// believed it had dropped, and the protected-folder count never moved.
+    ///
+    /// Reversible by design — the root is disabled, not deleted, so the files
+    /// already stored stay and re-adding the same folder reactivates *this*
+    /// root rather than building a second tree beside it.
+    pub async fn disable_root(&self, root_id: &str) -> Result<bp::BackupRoot, AppError> {
+        self.set_root_enabled(root_id, false).await
+    }
+
+    /// Protect a root again, on the server.
+    pub async fn enable_root(&self, root_id: &str) -> Result<bp::BackupRoot, AppError> {
+        self.set_root_enabled(root_id, true).await
+    }
+
+    async fn set_root_enabled(
+        &self,
+        root_id: &str,
+        enabled: bool,
+    ) -> Result<bp::BackupRoot, AppError> {
+        let action = if enabled { "enable" } else { "disable" };
+        let path = format!("{}/{root_id}/{action}", bp::ROOTS_PATH);
+        let client = build_client(CONTROL_TIMEOUT)?;
+        let response = self.authorize(client.post(self.url(&path)?)).send().await?;
+        if !response.status().is_success() {
+            return Err(backup_error(response).await);
+        }
+        let parsed: Envelope<bp::BackupRoot> = json_from_response(response).await?;
+        Ok(parsed.data)
+    }
+
     /// Create a folder entry.
     ///
     /// Uploading a file creates its missing parents, but an *empty* directory
@@ -551,4 +585,85 @@ pub async fn server_storage(
     }
     let parsed = json_from_response::<Envelope>(response).await?;
     Ok(parsed.data)
+}
+
+/// Turn computer backup back on for a profile that was disabled.
+///
+/// Authorised by the signed-in user, for the same reason `disable_profile` is:
+/// the credential this issues is the one that was revoked, so a grant cannot
+/// be the thing that resurrects itself.
+///
+/// No roots are sent. Disabling a profile marks every folder `DISABLED`
+/// server-side, and leaving them that way is the point — turning backup back
+/// on must not silently restart uploading folders somebody switched off. Each
+/// folder is resumed deliberately, one `enable_root` at a time.
+///
+/// The server always rotates the credential here, so the returned one replaces
+/// whatever this computer held.
+pub async fn enable_profile(
+    origin: &Url,
+    session_cookie_header: &str,
+    profile_id: &str,
+) -> Result<EnableOutcome, AppError> {
+    let url = origin
+        .join(&format!("/api/backup/profiles/{profile_id}/enable"))
+        .map_err(|_| from_code("ADDRESS_INVALID"))?;
+
+    let client = build_client(CONTROL_TIMEOUT)?;
+    let response = client
+        .post(url)
+        .header("Cookie", session_cookie_header)
+        .json(&serde_json::json!({ "roots": [] }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let err = backup_error(response).await;
+        tracing::warn!(code = %err.code, "re-enabling backup was rejected");
+        return Err(err);
+    }
+
+    let parsed: Envelope<EnableData> = json_from_response(response).await?;
+    tracing::info!(
+        profile_id = %parsed.data.profile.id,
+        credential_issued = parsed.data.credential_issued,
+        "computer backup re-enabled"
+    );
+    Ok(EnableOutcome {
+        profile: parsed.data.profile,
+        credential: parsed.data.credential,
+    })
+}
+
+/// Turn computer backup off for this machine, on the server.
+///
+/// Authorised by the signed-in user rather than the sync credential: the
+/// credential is exactly what this revokes, and a grant must not be able to
+/// destroy its own authority.
+///
+/// What the server does — and what it deliberately does not: the profile is
+/// disabled and its grants revoked, so the credential this computer holds
+/// stops working immediately. The Device stays paired, the user stays signed
+/// in, and every file already stored stays where it is. Stopping backup is not
+/// disconnecting the computer, and it is not a delete.
+pub async fn disable_profile(
+    origin: &Url,
+    session_cookie_header: &str,
+    profile_id: &str,
+) -> Result<(), AppError> {
+    let url = origin
+        .join(&format!("/api/backup/profiles/{profile_id}/disable"))
+        .map_err(|_| from_code("ADDRESS_INVALID"))?;
+
+    let client = build_client(CONTROL_TIMEOUT)?;
+    let response = client
+        .post(url)
+        .header("Cookie", session_cookie_header)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(backup_error(response).await);
+    }
+    Ok(())
 }

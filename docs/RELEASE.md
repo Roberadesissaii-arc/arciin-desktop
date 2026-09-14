@@ -183,10 +183,13 @@ Public distribution is **BLOCKED** until every box is ticked.
 
 - [ ] Continuous filesystem watcher complete and certified
 - [ ] Reconciliation after offline changes complete
-- [ ] Root disable/reactivate lifecycle integrated server-side
-- [ ] Profile stop/re-enable integrated (currently a client-side dead end —
-      stopping backup drops the sync credential while the server keeps the
-      profile, so re-enabling needs server-side grant rotation)
+- [x] Root disable/reactivate lifecycle integrated server-side
+- [x] Profile stop/re-enable integrated — the server disables the profile and
+      revokes the grant, the client keeps the profile and folder list so it can
+      offer them back, and re-enabling reuses the same profile with a freshly
+      rotated credential
+- [ ] Stop → re-enable certified against a live server (grant rotation proved,
+      no duplicate hierarchy)
 - [ ] Backup Center certified
 - [ ] Pairing and revocation certified
 - [ ] Graceful shutdown certified

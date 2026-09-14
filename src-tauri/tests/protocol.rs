@@ -546,3 +546,103 @@ fn backup_disabled_copy_does_not_mention_pairing() {
         "disabling backup is not a re-pair"
     );
 }
+
+// --- The server-authoritative lifecycle -----------------------------------
+//
+// Seven codes that all mean "the server said no", each with a different way
+// out. Collapsing them into one apology is how somebody ends up re-pairing a
+// computer when all they needed was to turn backup back on.
+
+const LIFECYCLE_CODES: [&str; 7] = [
+    "BACKUP_DISABLED",
+    "SYNC_ROOT_DISABLED",
+    "BACKUP_READ_ONLY",
+    "BACKUP_FORBIDDEN",
+    "BACKUP_NOT_FOUND",
+    "BACKUP_ROOT_NOT_FOUND",
+    "BACKUP_UNAUTHORIZED",
+];
+
+#[test]
+fn every_lifecycle_code_says_something_specific() {
+    let generic = from_code("A_CODE_NOBODY_HAS_HEARD_OF").message;
+    for code in LIFECYCLE_CODES {
+        let message = from_code(code).message;
+        assert_ne!(message, generic, "{code} falls through to the generic copy");
+        assert!(message.len() > 20, "{code} copy is too thin to act on");
+    }
+}
+
+#[test]
+fn no_two_lifecycle_codes_read_the_same() {
+    // Two situations with one message is the same failure as one generic
+    // message, just harder to spot.
+    for (i, a) in LIFECYCLE_CODES.iter().enumerate() {
+        for b in &LIFECYCLE_CODES[i + 1..] {
+            assert_ne!(
+                from_code(a).message,
+                from_code(b).message,
+                "{a} and {b} are different situations and must read differently"
+            );
+        }
+    }
+}
+
+#[test]
+fn backup_being_off_is_never_reported_as_a_lost_device() {
+    // The distinction the whole lifecycle rests on: none of these unpair the
+    // computer, and none of their copy may suggest it has been.
+    for code in LIFECYCLE_CODES {
+        assert!(!is_trust_lost(code), "{code} must not disconnect anyone");
+        let lowered = from_code(code).message.to_lowercase();
+        for alarming in ["unpair", "disconnect", "revoked", "deleted", "erased"] {
+            assert!(
+                !lowered.contains(alarming),
+                "{code} copy must not read as losing the device or the files"
+            );
+        }
+    }
+}
+
+#[test]
+fn backup_being_off_offers_a_way_back() {
+    // Not decoration. The state this replaces said backup had been turned off
+    // and stopped there, which is what made it look permanent.
+    let lowered = from_code("BACKUP_DISABLED").message.to_lowercase();
+    assert!(
+        lowered.contains("turn it back on"),
+        "the copy has to say backup can be turned back on"
+    );
+}
+
+#[test]
+fn a_disabled_folder_is_not_a_disabled_computer() {
+    // One folder stopping and the whole computer stopping need different
+    // answers: re-protect that folder, versus turn backup back on.
+    assert_ne!(
+        from_code("SYNC_ROOT_DISABLED").message,
+        from_code("BACKUP_DISABLED").message,
+    );
+}
+
+#[test]
+fn a_rejected_credential_is_not_a_missing_profile() {
+    // After backup is turned off, the old credential is revoked while the
+    // profile is still there to be re-enabled. Reporting that as "no backup
+    // set up" would send people through first-run setup and build a second
+    // tree on the server.
+    assert_ne!(
+        from_code("BACKUP_CREDENTIAL_INVALID").message,
+        from_code("BACKUP_NOT_FOUND").message,
+    );
+}
+
+#[test]
+fn nothing_in_the_lifecycle_copy_leaks_a_secret_shaped_word() {
+    for code in LIFECYCLE_CODES {
+        let lowered = from_code(code).message.to_lowercase();
+        for banned in ["arcsync", "cookie", "authorization", "bearer", "token"] {
+            assert!(!lowered.contains(banned), "{code} copy mentions {banned}");
+        }
+    }
+}
