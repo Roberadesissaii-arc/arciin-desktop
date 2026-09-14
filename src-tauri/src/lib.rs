@@ -172,6 +172,8 @@ pub fn run() {
             commands::backup_remove_root,
             commands::backup_reenable,
             commands::backup_resume_root,
+            commands::backup_resolve_safety_hold,
+            commands::backup_rescan,
             commands::backup_open_root,
             commands::close_backup_ui,
             commands::size_for_backup_center,

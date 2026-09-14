@@ -31,6 +31,13 @@ Settings — it is a shell, not a reimplementation. The trusted-device session i
 handed to the webview as an `HttpOnly` cookie, exactly as a browser would have
 received it.
 
+**Keeps up with changes.** While Arciin Desktop is running, protected folders
+are watched: a saved file is uploaded within seconds, a renamed one is moved
+rather than uploaded again, and a deleted one is moved to your server's Trash
+rather than destroyed. If an unusual number of files disappear at once — the
+shape of an unplugged drive, not a decision — backup pauses for that folder and
+asks, rather than removing the copies on your server.
+
 **Backs up folders.** Choose Windows known folders (Desktop, Documents,
 Pictures, Videos, Music, Downloads) or any folder via the native picker.
 Uploads are one-way — this PC is the source, your server is the destination —
@@ -61,15 +68,23 @@ building a second copy of it beside the first.
 | Backup Center — add, remove, pause, resume, stop | Working |
 | Stop and re-enable backup (server-authoritative) | Working |
 | Windows installer (NSIS) | Working |
-| **Continuous filesystem watcher** | **Not complete** |
-| **Reconciliation after offline changes** | **Not complete** |
+| Continuous filesystem watcher (while the app is running) | Working |
+| Reconciliation after offline changes | Working |
 | **Authenticode code signing** | **Not configured** |
 
-**The client does not yet continuously synchronise changes.** Files are
-uploaded when a backup runs — at setup, and when the app starts and resumes an
-existing profile. A watcher that reacts to files changing while the app is
-running is still being built and is not certified. Do not rely on this for
-continuous protection yet.
+**Arciin Desktop watches protected folders while it is running.** Create,
+edit, rename, move or delete a file in a protected folder and the change
+reaches your server within seconds — no restart, no "sync now".
+
+**It is not a background service.** While Arciin Desktop is closed nothing is
+watching, and nothing is uploaded. Changes made in the meantime are found by
+the reconciliation scan the next time it starts, so nothing is lost — but
+backup only runs while the app does. A Windows service is not part of this
+version.
+
+Changes are also reconciled periodically while it runs, because filesystem
+notifications can be dropped. The watcher is what makes it feel immediate; the
+scan is what makes it correct.
 
 ## Security model
 

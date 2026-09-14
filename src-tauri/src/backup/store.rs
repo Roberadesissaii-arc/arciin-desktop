@@ -33,7 +33,13 @@ use crate::error::AppError;
 // 2 added `profiles.status`: backup can now be turned off server-side while
 // this computer stays paired, and the row has to outlive that so the folders
 // can be offered back.
-const SCHEMA_VERSION: i64 = 2;
+//
+// 3 added the watcher's intent model: `entries.intent` (what the sync should
+// do with this entry, not merely that something happened to it),
+// `entries.synced_path` (where the server currently believes it lives, which
+// is what makes a rename a move rather than a re-upload), and `roots.status`
+// (a folder can be unavailable or held for safety without being disabled).
+const SCHEMA_VERSION: i64 = 3;
 
 /// What the engine intends to do, or has done, with one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +117,16 @@ pub struct Entry {
     /// The operation currently in flight, if any. Reused verbatim on retry so
     /// the server replays rather than duplicates.
     pub pending_operation_id: Option<String>,
+    /// What the engine should do with this entry when it reaches it.
+    pub intent: Intent,
+    /// Where the server currently believes this entry lives, or `None` if it
+    /// has never been sent.
+    ///
+    /// This is what makes a rename cheap. `relative_path` is where the file is
+    /// now; comparing the two says whether the server needs a move or merely
+    /// the new bytes. Without it, a renamed 2 GB file is a fresh upload and a
+    /// separate deletion.
+    pub synced_path: Option<String>,
 }
 
 /// A protected root as this machine knows it.
@@ -123,6 +139,8 @@ pub struct Root {
     /// Local, never sent.
     pub local_path: PathBuf,
     pub enabled: bool,
+    /// Whether the folder can currently be read, and whether it is being held.
+    pub status: RootStatus,
 }
 
 /// The backup profile this machine holds for one server.
@@ -139,6 +157,84 @@ pub struct Profile {
     /// stored on the server, and the only way to offer them back is to
     /// remember which ones they were.
     pub enabled: bool,
+}
+
+/// What the sync should *do* with an entry, as opposed to what happened to it.
+///
+/// This is the difference between a journal and a queue. A journal of raw
+/// filesystem events grows without bound and has to be replayed in order; an
+/// intent is a single fact about one entry that the next write simply
+/// replaces. Fifty saves of the same file leave one `Upsert`. A file created
+/// and deleted before anything was sent leaves nothing at all.
+///
+/// The filesystem remains the authority on content. An intent only says which
+/// call the engine should make; what it sends is read from disk at the moment
+/// it sends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    /// Create or replace: `create_folder` for a folder, `upload_file` for a
+    /// file. Also the intent for a file whose contents changed.
+    Upsert,
+    /// The entry is the same entry, somewhere else. Sent as a move so the
+    /// server keeps its identity and its history instead of gaining a copy.
+    Move,
+    /// Gone from this PC. The server soft-deletes; nothing is destroyed.
+    Tombstone,
+}
+
+impl Intent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Intent::Upsert => "UPSERT",
+            Intent::Move => "MOVE",
+            Intent::Tombstone => "TOMBSTONE",
+        }
+    }
+
+    /// Unknown values read as `Upsert`: re-sending costs bandwidth, whereas
+    /// guessing `Tombstone` would remove something.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "MOVE" => Intent::Move,
+            "TOMBSTONE" => Intent::Tombstone,
+            _ => Intent::Upsert,
+        }
+    }
+}
+
+/// Whether a protected folder can currently be backed up.
+///
+/// Distinct from `roots.enabled`, which is the server's lifecycle answer. This
+/// is about the folder on this PC right now: a disconnected drive is not a
+/// decision anybody made, and must never be treated as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootStatus {
+    /// Readable, and being kept up to date.
+    Active,
+    /// The folder could not be read. **No deletions may be inferred from
+    /// this**: an unplugged drive is not a user deleting ten thousand files.
+    Unavailable,
+    /// A reconciliation found more deletions than a person plausibly intended.
+    /// Held until somebody looks, rather than tombstoned.
+    SafetyHold,
+}
+
+impl RootStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RootStatus::Active => "ACTIVE",
+            RootStatus::Unavailable => "UNAVAILABLE",
+            RootStatus::SafetyHold => "SAFETY_HOLD",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "UNAVAILABLE" => RootStatus::Unavailable,
+            "SAFETY_HOLD" => RootStatus::SafetyHold,
+            _ => RootStatus::Active,
+        }
+    }
 }
 
 /// SQLite-backed sync state, serialised behind one connection.
@@ -205,6 +301,7 @@ impl SyncStore {
                 display_name TEXT NOT NULL,
                 local_path   TEXT NOT NULL,
                 enabled      INTEGER NOT NULL DEFAULT 1,
+                status       TEXT NOT NULL DEFAULT 'ACTIVE',
                 PRIMARY KEY (server_id, id),
                 FOREIGN KEY (server_id) REFERENCES profiles(server_id) ON DELETE CASCADE
             );
@@ -222,6 +319,10 @@ impl SyncStore {
                 modified_ms          INTEGER NOT NULL DEFAULT 0,
                 state                TEXT NOT NULL,
                 pending_operation_id TEXT,
+                -- What the sync should do, not what the filesystem did.
+                intent               TEXT NOT NULL DEFAULT 'UPSERT',
+                -- Where the server currently has it; NULL until first sent.
+                synced_path          TEXT,
                 updated_at           TEXT NOT NULL,
                 PRIMARY KEY (server_id, client_entry_id)
             );
@@ -242,17 +343,42 @@ impl SyncStore {
         // Databases created at version 1 have the tables but not the column.
         // `CREATE TABLE IF NOT EXISTS` above is a no-op for them, so the
         // column has to be added separately.
-        let has_enabled = conn.prepare("SELECT enabled FROM profiles LIMIT 0").is_ok();
-        if !has_enabled {
-            conn.execute_batch(
-                "ALTER TABLE profiles ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
-            )
-            .map_err(|err| {
-                tracing::error!(error = %err, "sync schema could not be upgraded");
-                AppError::internal("Backup state could not be prepared.")
-            })?;
-            tracing::info!("sync schema upgraded: profiles.enabled added");
-        }
+        //
+        // Each is checked for individually rather than keyed off the version
+        // number, because a database can be at any earlier version and adding
+        // a column that is already there is an error, not a no-op.
+        let add_column = |table: &str, column: &str, definition: &str| -> Result<(), AppError> {
+            let probe = format!("SELECT {column} FROM {table} LIMIT 0");
+            if conn.prepare(&probe).is_ok() {
+                return Ok(());
+            }
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition};"))
+                .map_err(|err| {
+                    tracing::error!(error = %err, table, column, "sync schema could not be upgraded");
+                    AppError::internal("Backup state could not be prepared.")
+                })?;
+            tracing::info!(table, column, "sync schema upgraded");
+            Ok(())
+        };
+
+        add_column("profiles", "enabled", "enabled INTEGER NOT NULL DEFAULT 1")?;
+        add_column("entries", "intent", "intent TEXT NOT NULL DEFAULT 'UPSERT'")?;
+        // Deliberately not defaulted to `relative_path`: an entry already
+        // SYNCED is where the server has it, and that is backfilled below.
+        // Anything else has genuinely never been sent.
+        add_column("entries", "synced_path", "synced_path TEXT")?;
+        add_column("roots", "status", "status TEXT NOT NULL DEFAULT 'ACTIVE'")?;
+
+        // Entries already synced by an earlier version are, by definition, at
+        // the path the server has. Without this every one of them would look
+        // like it had never been sent, and the first rename of any of them
+        // would upload the whole file again instead of moving it.
+        conn.execute(
+            "UPDATE entries SET synced_path = relative_path
+             WHERE synced_path IS NULL AND state = 'SYNCED'",
+            [],
+        )
+        .map_err(map_write)?;
 
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .ok();
@@ -386,13 +512,14 @@ impl SyncStore {
     pub fn save_root(&self, server_id: &str, root: &Root) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO roots (id, server_id, kind, display_name, local_path, enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO roots (id, server_id, kind, display_name, local_path, enabled, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(server_id, id) DO UPDATE SET
                 kind         = excluded.kind,
                 display_name = excluded.display_name,
                 local_path   = excluded.local_path,
-                enabled      = excluded.enabled",
+                enabled      = excluded.enabled,
+                status       = excluded.status",
             params![
                 root.id,
                 server_id,
@@ -400,6 +527,7 @@ impl SyncStore {
                 root.display_name,
                 root.local_path.to_string_lossy(),
                 root.enabled as i64,
+                root.status.as_str(),
             ],
         )
         .map_err(map_write)?;
@@ -410,7 +538,7 @@ impl SyncStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, kind, display_name, local_path, enabled
+                "SELECT id, kind, display_name, local_path, enabled, status
                  FROM roots WHERE server_id = ?1 ORDER BY display_name",
             )
             .map_err(map_read)?;
@@ -422,6 +550,7 @@ impl SyncStore {
                     display_name: row.get(2)?,
                     local_path: PathBuf::from(row.get::<_, String>(3)?),
                     enabled: row.get::<_, i64>(4)? != 0,
+                    status: RootStatus::parse(&row.get::<_, String>(5)?),
                 })
             })
             .map_err(map_read)?;
@@ -458,9 +587,10 @@ impl SyncStore {
         let key = crate::backup::protocol::path_identity_key(relative_path);
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT client_entry_id, root_id, relative_path, entry_type, size_bytes,
-                    modified_ms, state, pending_operation_id
-             FROM entries WHERE server_id = ?1 AND root_id = ?2 AND path_key = ?3",
+            &format!(
+                "SELECT {ENTRY_COLUMNS}
+             FROM entries WHERE server_id = ?1 AND root_id = ?2 AND path_key = ?3"
+            ),
             params![server_id, root_id, key],
             read_entry,
         )
@@ -475,9 +605,10 @@ impl SyncStore {
     ) -> Result<Option<Entry>, AppError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT client_entry_id, root_id, relative_path, entry_type, size_bytes,
-                    modified_ms, state, pending_operation_id
-             FROM entries WHERE server_id = ?1 AND client_entry_id = ?2",
+            &format!(
+                "SELECT {ENTRY_COLUMNS}
+             FROM entries WHERE server_id = ?1 AND client_entry_id = ?2"
+            ),
             params![server_id, client_entry_id],
             read_entry,
         )
@@ -492,8 +623,9 @@ impl SyncStore {
         conn.execute(
             "INSERT INTO entries (
                 client_entry_id, server_id, root_id, relative_path, path_key,
-                entry_type, size_bytes, modified_ms, state, pending_operation_id, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                entry_type, size_bytes, modified_ms, state, pending_operation_id,
+                intent, synced_path, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(server_id, client_entry_id) DO UPDATE SET
                 root_id              = excluded.root_id,
                 relative_path        = excluded.relative_path,
@@ -503,6 +635,8 @@ impl SyncStore {
                 modified_ms          = excluded.modified_ms,
                 state                = excluded.state,
                 pending_operation_id = excluded.pending_operation_id,
+                intent               = excluded.intent,
+                synced_path          = excluded.synced_path,
                 updated_at           = excluded.updated_at",
             params![
                 entry.client_entry_id,
@@ -515,6 +649,8 @@ impl SyncStore {
                 entry.modified_ms,
                 entry.state.as_str(),
                 entry.pending_operation_id,
+                entry.intent.as_str(),
+                entry.synced_path,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
@@ -556,7 +692,20 @@ impl SyncStore {
     ) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE entries SET state = ?3, pending_operation_id = NULL, updated_at = ?4
+            // On success the server now has this entry where it currently is,
+            // and the intent is spent. Recording the path it was accepted at
+            // is what lets the next rename be a move: without it, every entry
+            // looks like it has never been sent and a rename becomes a fresh
+            // upload plus a deletion.
+            //
+            // On failure both are left alone, so a retry still knows what it
+            // was trying to do.
+            "UPDATE entries
+                SET state = ?3,
+                    pending_operation_id = NULL,
+                    synced_path = CASE WHEN ?3 = 'SYNCED' THEN relative_path ELSE synced_path END,
+                    intent = CASE WHEN ?3 IN ('SYNCED', 'TOMBSTONED') THEN 'UPSERT' ELSE intent END,
+                    updated_at = ?4
              WHERE server_id = ?1 AND client_entry_id = ?2",
             params![
                 server_id,
@@ -574,31 +723,57 @@ impl SyncStore {
     /// `IN_PROGRESS` is included deliberately: after a crash those are not
     /// known to have succeeded, and replaying them with their stored
     /// `operationId` is exactly what idempotency is for.
+    /// The next batch of work, in an order that is safe to apply.
+    ///
+    /// Two orderings, because creation and deletion run opposite ways.
+    ///
+    /// *Creating*, a parent must exist before its child: folders before files,
+    /// shallowest first. *Deleting*, the reverse — a folder emptied from the
+    /// inside out never has to remove something that still has contents, and
+    /// the server is never asked to tombstone a parent whose children it still
+    /// believes in. Doing both in one pass with one rule is how a child ends
+    /// up created before its parent, which is a bug this already had once.
+    ///
+    /// Upserts and moves go before tombstones. A rename is a move followed by
+    /// nothing; a replace is an upsert followed by a tombstone of whatever it
+    /// replaced, and running the removal first would briefly leave the server
+    /// with neither copy.
     pub fn outstanding(&self, server_id: &str, limit: usize) -> Result<Vec<Entry>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT client_entry_id, root_id, relative_path, entry_type, size_bytes,
-                        modified_ms, state, pending_operation_id
+            .prepare(&format!(
+                "SELECT {ENTRY_COLUMNS}
                  FROM entries
                  WHERE server_id = ?1 AND state IN ('PENDING', 'IN_PROGRESS', 'FAILED')
-                 -- Folders first, then shallowest first, then by path.
-                 --
-                 -- `entry_type DESC` puts FOLDER ahead of FILE. Depth is what
-                 -- makes parent-before-child true: a parent is always strictly
-                 -- shallower than its child, so ordering by separator count
-                 -- puts every ancestor ahead of every descendant without
-                 -- building a dependency graph. Ordering by `updated_at` (as
-                 -- this did) ordered by when the scan happened to insert a
-                 -- row, which let a child be created before its parent.
-                 --
-                 -- The path tiebreak keeps same-depth entries in a stable,
-                 -- deterministic order rather than whatever SQLite returns.
-                 ORDER BY entry_type DESC,
-                          (length(relative_path) - length(replace(relative_path, '/', ''))) ASC,
-                          relative_path ASC
-                 LIMIT ?2",
-            )
+                 ORDER BY
+                   -- Removals last, so a replacement never briefly leaves the
+                   -- server with neither the old copy nor the new one.
+                   (intent = 'TOMBSTONE') ASC,
+
+                   -- Creating: every folder before every file. Stronger than
+                   -- depth alone needs to be, and deliberately so — it is the
+                   -- rule that is obvious to read, and a file can only ever
+                   -- need a folder.
+                   (CASE WHEN intent = 'TOMBSTONE' THEN 0
+                         ELSE (entry_type = 'FILE') END) ASC,
+
+                   -- Removing: the reverse. Files leave before the folders
+                   -- that held them, so the server is never asked to remove a
+                   -- folder it still believes has contents.
+                   (CASE WHEN intent = 'TOMBSTONE' THEN (entry_type = 'FOLDER')
+                         ELSE 0 END) ASC,
+
+                   -- Depth, counted from the separators in the path: a parent
+                   -- is always strictly shallower than its child, so this puts
+                   -- ancestors first without building a dependency graph.
+                   -- Negated for removals, which run from the leaves inward.
+                   ((CASE WHEN intent = 'TOMBSTONE' THEN -1 ELSE 1 END)
+                     * (length(relative_path) - length(replace(relative_path, '/', '')))) ASC,
+
+                   -- A stable tiebreak, rather than whatever SQLite returns.
+                   relative_path ASC
+                 LIMIT ?2"
+            ))
             .map_err(map_read)?;
         let rows = stmt
             .query_map(params![server_id, limit as i64], read_entry)
@@ -610,12 +785,11 @@ impl SyncStore {
     pub fn entries_in_root(&self, server_id: &str, root_id: &str) -> Result<Vec<Entry>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT client_entry_id, root_id, relative_path, entry_type, size_bytes,
-                        modified_ms, state, pending_operation_id
+            .prepare(&format!(
+                "SELECT {ENTRY_COLUMNS}
                  FROM entries
-                 WHERE server_id = ?1 AND root_id = ?2 AND state != 'TOMBSTONED'",
-            )
+                 WHERE server_id = ?1 AND root_id = ?2 AND state != 'TOMBSTONED'"
+            ))
             .map_err(map_read)?;
         let rows = stmt
             .query_map(params![server_id, root_id], read_entry)
@@ -732,6 +906,307 @@ impl SyncStore {
         Ok(())
     }
 
+    // --- What the watcher and the reconciler write ------------------------
+
+    /// Record that an entry is gone from this PC.
+    ///
+    /// Never a delete of the row: the row *is* the instruction to tell the
+    /// server, and it stays until the server has been told. What happens next
+    /// depends on whether the server ever knew about it:
+    ///
+    /// * never sent — there is nothing to tombstone, so the row goes. A file
+    ///   created and deleted before the queue drained should cost no requests
+    ///   at all.
+    /// * sent — queue a tombstone. The server soft-deletes; nothing is
+    ///   destroyed, and the copy stays recoverable from Trash.
+    ///
+    /// Returns whether anything was queued.
+    pub fn queue_tombstone(
+        &self,
+        server_id: &str,
+        client_entry_id: &str,
+    ) -> Result<bool, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let known: Option<Option<String>> = conn
+            .query_row(
+                "SELECT synced_path FROM entries WHERE server_id = ?1 AND client_entry_id = ?2",
+                params![server_id, client_entry_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_read)?;
+
+        let Some(synced_path) = known else {
+            return Ok(false);
+        };
+        if synced_path.is_none() {
+            conn.execute(
+                "DELETE FROM entries WHERE server_id = ?1 AND client_entry_id = ?2",
+                params![server_id, client_entry_id],
+            )
+            .map_err(map_write)?;
+            return Ok(false);
+        }
+
+        conn.execute(
+            "UPDATE entries
+                SET intent = 'TOMBSTONE', state = 'PENDING',
+                    pending_operation_id = NULL, updated_at = ?3
+             WHERE server_id = ?1 AND client_entry_id = ?2",
+            params![server_id, client_entry_id, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(map_write)?;
+        Ok(true)
+    }
+
+    /// Record that an entry is the same entry, at a new path.
+    ///
+    /// Only a move when the server already has it somewhere else. An entry it
+    /// has never seen is simply an upsert at its new path — asking the server
+    /// to move something it does not know about would fail, and re-uploading
+    /// is what it needed anyway.
+    pub fn queue_move(
+        &self,
+        server_id: &str,
+        client_entry_id: &str,
+        new_relative_path: &str,
+    ) -> Result<(), AppError> {
+        let key = crate::backup::protocol::path_identity_key(new_relative_path);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE entries
+                SET relative_path = ?3,
+                    path_key = ?4,
+                    intent = CASE WHEN synced_path IS NULL THEN 'UPSERT' ELSE 'MOVE' END,
+                    state = 'PENDING',
+                    pending_operation_id = NULL,
+                    updated_at = ?5
+             WHERE server_id = ?1 AND client_entry_id = ?2",
+            params![
+                server_id,
+                client_entry_id,
+                new_relative_path,
+                key,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(map_write)?;
+        Ok(())
+    }
+
+    /// Every live entry at or beneath one relative path.
+    ///
+    /// Deleting or moving a folder is never one entry: the server knows each
+    /// file under it individually, and each has to be told.
+    pub fn entries_under(
+        &self,
+        server_id: &str,
+        root_id: &str,
+        relative_path: &str,
+    ) -> Result<Vec<Entry>, AppError> {
+        let key = crate::backup::protocol::path_identity_key(relative_path);
+        // The separator matters here for the same reason it does when placing
+        // a watcher event: `notes2` is not inside `notes`.
+        let prefix = format!("{key}/");
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {ENTRY_COLUMNS}
+                 FROM entries
+                 WHERE server_id = ?1 AND root_id = ?2 AND state != 'TOMBSTONED'
+                   AND (path_key = ?3 OR path_key LIKE ?4 ESCAPE '\\')"
+            ))
+            .map_err(map_read)?;
+        // `_` and `%` are wildcards in LIKE and perfectly ordinary in a
+        // filename, so a folder called `report_v2` would otherwise match
+        // `reportXv2` as well.
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let rows = stmt
+            .query_map(
+                params![server_id, root_id, key, format!("{escaped}%")],
+                read_entry,
+            )
+            .map_err(map_read)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_read)
+    }
+
+    /// Move a folder and everything under it, in one transaction.
+    ///
+    /// Every descendant is queued as its own move rather than trusting the
+    /// server to cascade. Moves carry no bytes, so the cost is a handful of
+    /// small requests; the alternative is assuming a server behaviour that, if
+    /// it ever differed, would leave the whole subtree recorded at paths it is
+    /// not at — and nothing would ever notice, because reconciliation compares
+    /// the disk against this database, not against the server.
+    ///
+    /// Entries the server has never seen become plain upserts: there is
+    /// nothing to move them from.
+    pub fn queue_subtree_move(
+        &self,
+        server_id: &str,
+        root_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<usize, AppError> {
+        let affected = self.entries_under(server_id, root_id, from)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(map_write)?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for entry in &affected {
+            // Rebuilt from the recorded path rather than the key, so the
+            // spelling the user chose survives the move.
+            let suffix = entry.relative_path.get(from.len()..).unwrap_or("");
+            let moved = format!("{to}{suffix}");
+            let key = crate::backup::protocol::path_identity_key(&moved);
+            tx.execute(
+                "UPDATE entries
+                    SET relative_path = ?3,
+                        path_key = ?4,
+                        intent = CASE WHEN synced_path IS NULL THEN 'UPSERT' ELSE 'MOVE' END,
+                        state = 'PENDING',
+                        pending_operation_id = NULL,
+                        updated_at = ?5
+                 WHERE server_id = ?1 AND client_entry_id = ?2",
+                params![server_id, entry.client_entry_id, moved, key, now],
+            )
+            .map_err(map_write)?;
+        }
+
+        tx.commit().map_err(map_write)?;
+        Ok(affected.len())
+    }
+
+    /// Record that a folder and everything under it are gone.
+    ///
+    /// One transaction, because a half-applied removal is a database that
+    /// describes something which never happened: some children tombstoned, the
+    /// folder still present, and nothing to reconcile the two.
+    pub fn queue_subtree_tombstone(
+        &self,
+        server_id: &str,
+        root_id: &str,
+        relative_path: &str,
+    ) -> Result<usize, AppError> {
+        let affected = self.entries_under(server_id, root_id, relative_path)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(map_write)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut queued = 0usize;
+
+        for entry in &affected {
+            if entry.synced_path.is_none() {
+                // Never sent, so there is nothing to tell the server about.
+                tx.execute(
+                    "DELETE FROM entries WHERE server_id = ?1 AND client_entry_id = ?2",
+                    params![server_id, entry.client_entry_id],
+                )
+                .map_err(map_write)?;
+                continue;
+            }
+            tx.execute(
+                "UPDATE entries
+                    SET intent = 'TOMBSTONE', state = 'PENDING',
+                        pending_operation_id = NULL, updated_at = ?3
+                 WHERE server_id = ?1 AND client_entry_id = ?2",
+                params![server_id, entry.client_entry_id, now],
+            )
+            .map_err(map_write)?;
+            queued += 1;
+        }
+
+        tx.commit().map_err(map_write)?;
+        Ok(queued)
+    }
+
+    /// Whether this folder can currently be backed up, and why not.
+    ///
+    /// Separate from `enabled`, which is the server's answer. A disconnected
+    /// drive is not a decision anybody made, and the difference decides
+    /// whether a missing file means "deleted" or "cannot see it right now".
+    pub fn set_root_status(
+        &self,
+        server_id: &str,
+        root_id: &str,
+        status: RootStatus,
+    ) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE roots SET status = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![server_id, root_id, status.as_str()],
+        )
+        .map_err(map_write)?;
+        Ok(())
+    }
+
+    /// How many entries this root has, for judging whether a deletion set is
+    /// plausible or catastrophic.
+    pub fn entry_count_in_root(&self, server_id: &str, root_id: &str) -> Result<i64, AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM entries
+             WHERE server_id = ?1 AND root_id = ?2 AND state != 'TOMBSTONED'",
+            params![server_id, root_id],
+            |row| row.get(0),
+        )
+        .map_err(map_read)
+    }
+
+    /// Queue several entries as one unit.
+    ///
+    /// Reconciliation produces a set of changes that only make sense together
+    /// — a rename is a path change, a replacement is an upsert beside a
+    /// removal. Applying half of one and then failing is how the database ends
+    /// up describing something that never happened on disk.
+    pub fn apply_batch(&self, server_id: &str, entries: &[Entry]) -> Result<(), AppError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(map_write)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for entry in entries {
+            let key = crate::backup::protocol::path_identity_key(&entry.relative_path);
+            tx.execute(
+                "INSERT INTO entries (
+                    client_entry_id, server_id, root_id, relative_path, path_key,
+                    entry_type, size_bytes, modified_ms, state, pending_operation_id,
+                    intent, synced_path, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(server_id, client_entry_id) DO UPDATE SET
+                    root_id              = excluded.root_id,
+                    relative_path        = excluded.relative_path,
+                    path_key             = excluded.path_key,
+                    entry_type           = excluded.entry_type,
+                    size_bytes           = excluded.size_bytes,
+                    modified_ms          = excluded.modified_ms,
+                    state                = excluded.state,
+                    pending_operation_id = excluded.pending_operation_id,
+                    intent               = excluded.intent,
+                    synced_path          = excluded.synced_path,
+                    updated_at           = excluded.updated_at",
+                params![
+                    entry.client_entry_id,
+                    server_id,
+                    entry.root_id,
+                    entry.relative_path,
+                    key,
+                    entry.entry_type.as_str(),
+                    entry.size_bytes,
+                    entry.modified_ms,
+                    entry.state.as_str(),
+                    entry.pending_operation_id,
+                    entry.intent.as_str(),
+                    entry.synced_path,
+                    now,
+                ],
+            )
+            .map_err(map_write)?;
+        }
+        tx.commit().map_err(map_write)?;
+        Ok(())
+    }
+
     /// Drop queued work belonging to folders that are not being backed up.
     ///
     /// A safety net, not a substitute for `disable_root`. Rows can outlive the
@@ -759,6 +1234,10 @@ impl SyncStore {
     }
 }
 
+/// The column list every entry query selects, in the order `read_entry` wants.
+const ENTRY_COLUMNS: &str = "client_entry_id, root_id, relative_path, entry_type, size_bytes, \
+     modified_ms, state, pending_operation_id, intent, synced_path";
+
 fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
         client_entry_id: row.get(0)?,
@@ -769,6 +1248,8 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         modified_ms: row.get(5)?,
         state: SyncState::parse(&row.get::<_, String>(6)?),
         pending_operation_id: row.get(7)?,
+        intent: Intent::parse(&row.get::<_, String>(8)?),
+        synced_path: row.get(9)?,
     })
 }
 
@@ -816,6 +1297,8 @@ mod tests {
             modified_ms: 1_700_000_000_000,
             state: SyncState::Pending,
             pending_operation_id: None,
+            intent: Intent::Upsert,
+            synced_path: None,
         }
     }
 
@@ -1120,6 +1603,7 @@ mod tests {
                     display_name: "Pictures".into(),
                     local_path: std::path::PathBuf::from(r"C:\Users\x\Pictures"),
                     enabled: true,
+                    status: RootStatus::Active,
                 },
             )
             .unwrap();
@@ -1206,6 +1690,7 @@ mod tests {
             display_name: name.into(),
             local_path: PathBuf::from(format!(r"D:\Profiles\TestUser\{name}")),
             enabled: true,
+            status: RootStatus::Active,
         }
     }
 

@@ -29,7 +29,7 @@ use tokio::sync::Semaphore;
 
 use crate::backup::client::{classify, BackupClient, Retry};
 use crate::backup::protocol::BackupHealth;
-use crate::backup::store::{Entry, EntryType, SyncState, SyncStore};
+use crate::backup::store::{Entry, EntryType, Intent, RootStatus, SyncState, SyncStore};
 use crate::error::AppError;
 
 /// Simultaneous transfers.
@@ -365,6 +365,12 @@ async fn send_entry(
     if !root.enabled {
         return Ok(());
     }
+    // A folder that cannot be read, or one being held after a mass change, is
+    // not a folder to act on. Its queue stays exactly as it is until somebody
+    // or something resolves the state.
+    if root.status != RootStatus::Active {
+        return Ok(());
+    }
 
     // Reuse the key from an interrupted attempt; otherwise mint one. Either
     // way it is persisted before the request leaves.
@@ -374,16 +380,75 @@ async fn send_entry(
         .unwrap_or_else(new_operation_id);
     store.begin_operation(server_id, &entry.client_entry_id, &operation_id)?;
 
-    let outcome = match entry.entry_type {
-        EntryType::Folder => client
-            .create_folder(
+    // Removal first, because it is the one intent that does not care what is
+    // on disk — by the time it is queued the thing is already gone.
+    if entry.intent == Intent::Tombstone {
+        let result = client
+            .tombstone_entry(&root.id, &entry.client_entry_id, &operation_id)
+            .await;
+        return finish(
+            server_id,
+            store,
+            stats,
+            &entry,
+            result.map(|_| ()),
+            SyncState::Tombstoned,
+        );
+    }
+
+    // A move keeps the entry's identity, so the server keeps its history and
+    // its bytes. The alternative — upload to the new path, tombstone the old —
+    // re-sends the whole file to say something the server could have been told
+    // in one small request, and briefly shows the user two copies.
+    if entry.intent == Intent::Move {
+        let result = client
+            .move_entry(
                 &root.id,
                 &entry.client_entry_id,
                 &entry.relative_path,
                 &operation_id,
             )
-            .await
-            .map(|_| ()),
+            .await;
+        return finish(
+            server_id,
+            store,
+            stats,
+            &entry,
+            result.map(|_| ()),
+            SyncState::Synced,
+        );
+    }
+
+    let outcome = match entry.entry_type {
+        EntryType::Folder => {
+            // A folder that is gone locally is a removal, exactly as a file
+            // would be. Without this a deleted directory is re-created on the
+            // server on every pass.
+            let absolute = root.local_path.join(entry.relative_path.replace('/', "\\"));
+            if !absolute.is_dir() {
+                tracing::info!("a queued folder no longer exists; recording a tombstone");
+                let result = client
+                    .tombstone_entry(&root.id, &entry.client_entry_id, &operation_id)
+                    .await;
+                return finish(
+                    server_id,
+                    store,
+                    stats,
+                    &entry,
+                    result.map(|_| ()),
+                    SyncState::Tombstoned,
+                );
+            }
+            client
+                .create_folder(
+                    &root.id,
+                    &entry.client_entry_id,
+                    &entry.relative_path,
+                    &operation_id,
+                )
+                .await
+                .map(|_| ())
+        }
         EntryType::File => {
             let absolute = root.local_path.join(entry.relative_path.replace('/', "\\"));
 

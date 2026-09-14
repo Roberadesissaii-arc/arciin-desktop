@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 
-import { describeDormantFolder, formatBytes, formatCount } from "../src/lib/format"
+import {
+  describeBackupStatus,
+  describeDormantFolder,
+  describeProtectedFolder,
+  formatBytes,
+  formatCount,
+} from "../src/lib/format"
 import type { BackupAvailability, BackupState } from "../src/types"
 
 /**
@@ -67,6 +73,7 @@ describe("backup state shape", () => {
     // have to arrive through this type.
     const state: BackupState = {
       enabled: true,
+      watching: true,
       lifecycle: "ACTIVE",
       status: {
         health: "SYNCING",
@@ -85,6 +92,7 @@ describe("backup state shape", () => {
           enabled: true,
           localPath: "C:\Users\TestUser\Desktop",
           localPathExists: true,
+          status: "ACTIVE",
           fileCount: 12,
           pending: 0,
           failed: 0,
@@ -100,7 +108,12 @@ describe("backup state shape", () => {
   })
 
   it("reports a computer that was never set up without a status block", () => {
-    const state: BackupState = { enabled: false, lifecycle: "NOT_SET_UP", roots: [] }
+    const state: BackupState = {
+      enabled: false,
+      watching: false,
+      lifecycle: "NOT_SET_UP",
+      roots: [],
+    }
     expect(state.status).toBeUndefined()
     expect(state.roots).toHaveLength(0)
   })
@@ -111,6 +124,7 @@ describe("backup state shape", () => {
     // a one-way door into first-run setup and a duplicate tree on the server.
     const state: BackupState = {
       enabled: false,
+      watching: false,
       lifecycle: "DISABLED",
       roots: [
         {
@@ -120,6 +134,7 @@ describe("backup state shape", () => {
           enabled: false,
           localPath: "D:\\Profiles\\TestUser\\Desktop",
           localPathExists: true,
+          status: "ACTIVE",
           fileCount: 0,
           pending: 0,
           failed: 0,
@@ -891,5 +906,119 @@ describe("open folder availability", () => {
 
   it("is withheld for a folder that has been deleted", () => {
     expect(canOpenInExplorer({ localPathExists: false })).toBe(false)
+  })
+})
+
+/**
+ * What a protected folder is allowed to say about itself.
+ *
+ * Two states the queue length cannot express and which matter more than it:
+ * Arciin cannot read the folder, or Arciin has stopped touching it after
+ * something alarming. Either reported as "up to date" would be this screen's
+ * most misleading possible claim.
+ */
+describe("protected folder status", () => {
+  const healthy = {
+    status: "ACTIVE",
+    localPathExists: true,
+    fileCount: 12,
+    bytesSynced: 2048,
+    pending: 0,
+    failed: 0,
+  }
+
+  it("reports what is stored when all is well", () => {
+    expect(describeProtectedFolder(healthy)).toBe("12 files · 2 KB")
+  })
+
+  it("says how much is left rather than a made-up percentage", () => {
+    expect(describeProtectedFolder({ ...healthy, pending: 3 })).toContain("3 to go")
+  })
+
+  it("does not hide failures behind a file count", () => {
+    expect(describeProtectedFolder({ ...healthy, failed: 2 })).toContain("2 failed")
+  })
+
+  it("says a folder is unavailable rather than claiming it is backed up", () => {
+    // The unplugged-drive case. "12 files · 2.0 KB" here would be true of the
+    // past and useless about the present.
+    expect(describeProtectedFolder({ ...healthy, status: "UNAVAILABLE" })).toBe(
+      "Folder unavailable on this PC",
+    )
+    expect(describeProtectedFolder({ ...healthy, localPathExists: false })).toBe(
+      "Folder unavailable on this PC",
+    )
+  })
+
+  it("says a held folder is paused, and why", () => {
+    expect(describeProtectedFolder({ ...healthy, status: "SAFETY_HOLD" })).toBe(
+      "Paused — a lot of files disappeared",
+    )
+  })
+})
+
+describe("overall backup status", () => {
+  const roots = [{ status: "ACTIVE", enabled: true }]
+  const idle = { paused: false, filesOutstanding: 0, filesFailed: 0 }
+
+  it("is up to date when watching and nothing is owed", () => {
+    expect(describeBackupStatus({ watching: true, status: idle, roots })).toBe("Up to date")
+  })
+
+  it("admits when changes are only picked up periodically", () => {
+    // Without a watcher a change reaches Arciin at the next check. Saying
+    // "Up to date" flat would promise something nobody is delivering.
+    expect(describeBackupStatus({ watching: false, status: idle, roots })).toContain(
+      "checking periodically",
+    )
+  })
+
+  it("counts what is left rather than inventing progress", () => {
+    expect(
+      describeBackupStatus({
+        watching: true,
+        status: { ...idle, filesOutstanding: 3 },
+        roots,
+      }),
+    ).toBe("Backing up 3 files")
+  })
+
+  it("puts a safety hold above everything else", () => {
+    // Even mid-upload. It is the one state where backup has stopped and only
+    // the user can restart it.
+    expect(
+      describeBackupStatus({
+        watching: true,
+        status: { ...idle, filesOutstanding: 900 },
+        roots: [{ status: "SAFETY_HOLD", enabled: true }],
+      }),
+    ).toBe("Paused for safety")
+  })
+
+  it("surfaces an unavailable folder above a quiet queue", () => {
+    expect(
+      describeBackupStatus({
+        watching: true,
+        status: idle,
+        roots: [{ status: "UNAVAILABLE", enabled: true }],
+      }),
+    ).toBe("A folder is unavailable")
+  })
+
+  it("ignores folders that are not protected", () => {
+    // A switched-off folder being unreadable is not news.
+    expect(
+      describeBackupStatus({
+        watching: true,
+        status: idle,
+        roots: [{ status: "UNAVAILABLE", enabled: false }],
+      }),
+    ).toBe("Up to date")
+  })
+
+  it("reports paused as paused", () => {
+    expect(
+      describeBackupStatus({ watching: true, status: { ...idle, paused: true }, roots }),
+    ).toBe("Paused")
   })
 })

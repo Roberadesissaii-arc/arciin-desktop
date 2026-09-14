@@ -147,6 +147,9 @@ export type BackupStatus = {
   lastError?: string
 }
 
+/** `ACTIVE` — fine. `UNAVAILABLE` — cannot be read. `SAFETY_HOLD` — held. */
+export type RootFolderStatus = "ACTIVE" | "UNAVAILABLE" | "SAFETY_HOLD"
+
 export type ProtectedRoot = {
   id: string
   kind: string
@@ -169,6 +172,15 @@ export type ProtectedRoot = {
    * must not offer to open it.
    */
   localPathExists: boolean
+  /**
+   * Whether this folder can currently be backed up, and why not.
+   *
+   * Separate from `enabled`, which is the server's answer. A folder Arciin
+   * cannot read, or one it stopped touching after an unusually large change,
+   * is not a folder anybody switched off — and the difference is what the user
+   * needs to know.
+   */
+  status: RootFolderStatus
   fileCount: number
   pending: number
   failed: number
@@ -193,6 +205,14 @@ export type BackupLifecycle = "NOT_SET_UP" | "ACTIVE" | "DISABLED"
 
 export type BackupState = {
   enabled: boolean
+  /**
+   * Whether protected folders are being watched right now.
+   *
+   * Changes what the user should expect: watched means a change reaches Arciin
+   * in seconds, not watched means at the next check. Saying so is the
+   * difference between a promise kept and a promise nobody made.
+   */
+  watching: boolean
   lifecycle: BackupLifecycle
   status?: BackupStatus
   roots: ProtectedRoot[]

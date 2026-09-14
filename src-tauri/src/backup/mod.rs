@@ -21,5 +21,8 @@ pub mod known_folders;
 pub mod manager;
 pub mod ordering;
 pub mod protocol;
+pub mod reconcile;
 pub mod scan;
 pub mod store;
+pub mod supervisor;
+pub mod watcher;

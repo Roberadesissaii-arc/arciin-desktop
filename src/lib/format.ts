@@ -122,3 +122,62 @@ export function describeDormantFolder(root: {
       : "Nothing backed up yet"
   return root.localPathExists ? stored : `${stored} · Local folder not found`
 }
+
+/**
+ * What a folder that is being backed up is currently doing.
+ *
+ * Two things a folder can be that the queue length cannot express, and both
+ * matter more than the count: Arciin cannot read it, or Arciin has stopped
+ * touching it after something alarming happened to it. Reporting either as
+ * "up to date" would be the most misleading thing this screen could say — it
+ * is precisely the moment somebody needs to look.
+ */
+export function describeProtectedFolder(root: {
+  status: string
+  localPathExists: boolean
+  fileCount: number
+  bytesSynced: number
+  pending: number
+  failed: number
+}): string {
+  if (root.status === "SAFETY_HOLD") {
+    return "Paused — a lot of files disappeared"
+  }
+  if (root.status === "UNAVAILABLE" || !root.localPathExists) {
+    return "Folder unavailable on this PC"
+  }
+
+  const parts = [`${formatCount(root.fileCount)} files · ${formatBytes(root.bytesSynced)}`]
+  if (root.pending > 0) parts.push(`${formatCount(root.pending)} to go`)
+  if (root.failed > 0) parts.push(`${formatCount(root.failed)} failed`)
+  return parts.join(" · ")
+}
+
+/**
+ * The one line at the top: what backup as a whole is doing.
+ *
+ * No invented percentages. Byte-accurate progress is only knowable for files
+ * already measured, and a bar that jumps backwards as a scan discovers more is
+ * worse than a plain count of what is left.
+ */
+export function describeBackupStatus(state: {
+  watching: boolean
+  status?: { paused: boolean; filesOutstanding: number; filesFailed: number }
+  roots: { status: string; enabled: boolean }[]
+}): string {
+  const protectedRoots = state.roots.filter((root) => root.enabled)
+  if (protectedRoots.some((root) => root.status === "SAFETY_HOLD")) {
+    return "Paused for safety"
+  }
+  if (protectedRoots.some((root) => root.status === "UNAVAILABLE")) {
+    return "A folder is unavailable"
+  }
+  if (state.status?.paused) return "Paused"
+  if ((state.status?.filesOutstanding ?? 0) > 0) {
+    return `Backing up ${formatCount(state.status?.filesOutstanding ?? 0)} files`
+  }
+  if ((state.status?.filesFailed ?? 0) > 0) return "Needs attention"
+  // Deliberately different from "Up to date". Without a watcher a change is
+  // picked up at the next check, and claiming otherwise would overstate it.
+  return state.watching ? "Up to date" : "Up to date · checking periodically"
+}

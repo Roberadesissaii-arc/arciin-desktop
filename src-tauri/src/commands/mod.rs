@@ -416,6 +416,35 @@ pub async fn backup_resume_root(
         .await
 }
 
+/// Accept a large change that was held for safety, and let the folder resume.
+///
+/// Deliberately explicit. The guard held because thousands of files
+/// disappearing is more often a fault than an intention, and only the person
+/// looking at the folder can say which it was.
+#[tauri::command]
+pub fn backup_resolve_safety_hold(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_id: String,
+) -> Result<crate::backup::manager::BackupState, AppError> {
+    let connection = active(&state)?;
+    state
+        .backup
+        .resolve_safety_hold(&app, &connection.server_id, &root_id)
+}
+
+/// Ask for every protected folder to be read again now.
+///
+/// What "Check for changes" does. Also the honest answer to any moment the
+/// event stream cannot be trusted, which is why the client calls it itself
+/// after waking and after resuming.
+#[tauri::command]
+pub fn backup_rescan(state: State<'_, AppState>) -> Result<(), AppError> {
+    let _ = active(&state)?;
+    state.backup.request_reconcile();
+    Ok(())
+}
+
 /// Close the native backup surface and return to the running Arciin window.
 ///
 /// Native rather than a route change: the old "back" only changed a React
