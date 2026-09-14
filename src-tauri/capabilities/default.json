@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Onboarding window only. The window that renders the remote Arciin origin is deliberately absent from this list, so the server's pages have no access to any native command.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "opener:default"
+  ]
+}

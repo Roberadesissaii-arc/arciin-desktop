@@ -1,0 +1,158 @@
+/*
+ * Arciin Desktop onboarding theme.
+ *
+ * These values are not invented. Every one is lifted from the reference web
+ * app's light auth surface - the same design the user meets at /login and
+ * /setup - so the desktop shell and the server's own UI read as one product.
+ *
+ * Source: arciin-main/apps/web/components/auth/auth-light.tsx
+ *         arciin-main/apps/web/components/auth/login-page-shell.tsx
+ *         arciin-main/apps/web/app/globals.css
+ *
+ * See docs/DESIGN-INVENTORY.md for the full mapping.
+ */
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/SpaceGrotesk-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+:root {
+  /* Brand */
+  --arciin-accent: #ff4f12;
+  --arciin-hero: linear-gradient(155deg, #ff6a30 0%, #c82d00 100%);
+  --arciin-primary: linear-gradient(135deg, #ff6a30 0%, #cc2e00 100%);
+
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-quiet: #f7f7f7;
+  --shell: #09090b;
+
+  /* Text */
+  --text-strong: #111111;
+  --text: #222222;
+  --text-secondary: #717171;
+  --text-muted: #a0a0a0;
+  --text-faint: #c0c0c0;
+
+  /* Lines */
+  --border-card: #efefef;
+  --border-field: #e8e8e8;
+  --border-button: #e5e5e5;
+
+  /* Status */
+  --error-border: #fecaca;
+  --error-bg: #fef2f2;
+  --error-text: #b91c1c;
+  --info-border: #fde5b8;
+  --info-bg: #fffaf0;
+  --info-text: #92600a;
+  --success-border: #bbf7d0;
+  --success-bg: #f0fdf4;
+  --success-text: #15803d;
+
+  /* Shape */
+  --radius-card: 24px;
+  --radius-control: 16px;
+  --radius-hero: 22px;
+  --control-height: 48px;
+
+  --font-heading: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+
+  color-scheme: light;
+}
+
+/*
+ * The window is painted the dark shell colour before React mounts, matching
+ * the Tauri window background, so startup never flashes white.
+ */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--shell);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  /* The shell is chrome, not a document: it must not rubber-band or select. */
+  overflow: hidden;
+  user-select: none;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input {
+  font-family: inherit;
+  user-select: text;
+}
+
+/* A single, consistent focus ring in the brand accent. */
+:focus-visible {
+  outline: 2px solid var(--arciin-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@keyframes arciin-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes arciin-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes arciin-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.1;
+    transform: scale(1.35);
+  }
+}
+
+.spin {
+  animation: arciin-spin 0.9s linear infinite;
+}
+
+.fade-up {
+  animation: arciin-fade-up 0.28s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation-duration: 2.4s;
+  }
+  .fade-up {
+    animation: none;
+  }
+}

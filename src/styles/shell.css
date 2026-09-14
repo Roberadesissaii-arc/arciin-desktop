@@ -1,0 +1,616 @@
+/*
+ * Layout for the onboarding shell.
+ *
+ * The two-column split - form on the left, rounded orange hero on the right -
+ * is the same composition as the web app's /login page, so the desktop's first
+ * screen and the server's own sign-in screen feel continuous.
+ */
+
+.shell {
+  display: flex;
+  height: 100%;
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* --- Left column: brand, content, footer -------------------------------- */
+
+.shell__main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 50%;
+  padding: 24px 48px;
+}
+
+.shell__brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.shell__brand-mark {
+  display: block;
+  width: 18px;
+  height: 20px;
+}
+
+.shell__wordmark {
+  font-family: var(--font-heading);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  color: var(--text-strong);
+}
+
+.shell__wordmark span {
+  color: var(--arciin-accent);
+}
+
+.shell__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-height: 0;
+  /* Scrollable, but the bar is never drawn — see `.scroll-area`. */
+  overflow-y: auto;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+  padding: 16px 0;
+}
+
+.shell__body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.shell__content {
+  width: 100%;
+  max-width: 440px;
+}
+
+.shell__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* --- Right column: the orange hero panel -------------------------------- */
+
+.shell__hero {
+  flex: 1 1 50%;
+  padding: 16px 16px 16px 0;
+  min-width: 0;
+}
+
+.hero {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-hero);
+  background: var(--arciin-hero);
+  display: flex;
+  flex-direction: column;
+  padding: 32px;
+  color: #ffffff;
+}
+
+/* The same soft light/shade blooms the web hero panel uses. */
+.hero::before,
+.hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.hero::before {
+  top: -96px;
+  right: -10%;
+  width: 360px;
+  height: 360px;
+  background: rgba(255, 255, 255, 0.1);
+  filter: blur(90px);
+}
+
+.hero::after {
+  bottom: -20%;
+  left: -8%;
+  width: 320px;
+  height: 320px;
+  background: rgba(0, 0, 0, 0.15);
+  filter: blur(80px);
+}
+
+.hero__top {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hero__wordmark {
+  font-family: var(--font-heading);
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.hero__wordmark span {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.hero__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.hero__bottom {
+  position: relative;
+  z-index: 1;
+  /* Still bottom-anchored when the illustration is hidden on short windows. */
+  margin-top: auto;
+}
+
+.hero__headline {
+  font-family: var(--font-heading);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0;
+}
+
+.hero__sub {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.8);
+  max-width: 34ch;
+}
+
+.hero__points {
+  list-style: none;
+  margin: 28px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hero__point {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+/*
+ * Below ~1100px the hero is dropped rather than squeezed: the form column is
+ * what matters, and a crushed hero panel looks broken at 150% Windows scaling.
+ */
+@media (max-width: 1100px) {
+  .shell__hero {
+    display: none;
+  }
+  .shell__main {
+    flex-basis: 100%;
+    padding: 24px 32px;
+  }
+}
+
+/* --- Hero illustration --------------------------------------------------
+ *
+ * Follows the reference sign-in hero's composition rule: oversized, anchored,
+ * bleeding off the right edge, fading out toward the bottom. Not a card
+ * floating in the middle of the panel.
+ *
+ * Palette is the reference's own: translucent white over the orange, hairline
+ * borders, 9-12px type, no colour of its own.
+ */
+
+.hero__middle {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 28px;
+  /* Dissolves into the headline rather than stopping at a hard edge. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0 72%, transparent 100%);
+}
+
+.scene {
+  position: relative;
+  width: 100%;
+  /* Spans the panel so the composition reads left to right: this computer on
+     the left, the server away to the right, the wire travelling between them.
+     Anchoring the whole scene right made it a cluster in one corner. */
+  margin: 0;
+}
+
+/* --- Shared card chrome --- */
+
+.scene__device,
+.scene__server {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  backdrop-filter: blur(3px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+.scene__text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.scene__title {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: rgba(255, 255, 255, 0.95);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene__sub {
+  margin: 1px 0 0;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.52);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- This PC --- */
+
+.scene__device {
+  position: relative;
+  z-index: 2;
+  /* Left-anchored: the start of the journey. */
+  width: 52%;
+  min-width: 196px;
+  max-width: 292px;
+  margin-right: auto;
+  overflow: hidden;
+}
+
+/* Three dots: reads as a window without drawing a whole one. */
+.scene__chrome {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.scene__chrome i {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.scene__deviceBody {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 11px;
+}
+
+.scene__deviceFoot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px 10px;
+}
+
+.scene__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2.5px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.72);
+  white-space: nowrap;
+}
+
+.scene__tag--quiet {
+  font-family: var(--font-mono);
+  border-color: transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.scene__tagSpacer {
+  flex: 1 1 auto;
+}
+
+.scene__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* --- The wire --- */
+
+.scene__wire {
+  display: block;
+  /* Spans the full width so the path can carry the eye from the left card to
+     the right one. Its height *is* the gap between them. */
+  width: 100%;
+  height: 116px;
+  margin: 5px 0;
+  position: relative;
+  z-index: 1;
+  overflow: visible;
+}
+
+/* --- The server --- */
+
+.scene__server {
+  position: relative;
+  z-index: 2;
+  /* Right-anchored: the destination. It stops inside the hero's own padding,
+     so its right edge is inset from the panel by the same gutter the device
+     card leaves on the left. Previously it ran past the edge and read as
+     touching the container. */
+  width: 82%;
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: 0;
+  padding: 12px 13px 11px;
+}
+
+/* Soft rings behind the server, suggesting it announcing itself. */
+.scene__rings {
+  position: absolute;
+  top: 22px;
+  left: 26px;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.scene__rings i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  opacity: 0;
+  animation: scene-ring 3.6s ease-out infinite;
+}
+
+.scene__rings i:nth-child(2) {
+  animation-delay: 1.2s;
+}
+
+.scene__rings i:nth-child(3) {
+  animation-delay: 2.4s;
+}
+
+@keyframes scene-ring {
+  0% {
+    transform: scale(0.45);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+.scene__serverHead {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.scene__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.scene__mark img {
+  width: 13px;
+  height: 15px;
+  /* The asset is brand orange; on orange it has to be white. */
+  filter: brightness(0) invert(1);
+  opacity: 0.95;
+}
+
+.scene__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 8.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.scene__status i {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #ffffff;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.9);
+  animation: scene-blink 2.2s ease-in-out infinite;
+}
+
+@keyframes scene-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Illustrative library rows — shape only, no real data. */
+.scene__rows {
+  list-style: none;
+  margin: 11px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scene__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scene__rowLabel {
+  flex: 0 0 58px;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.scene__rowBar {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.scene__rowBar i {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.scene__trust {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 9.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.66);
+}
+
+.scene__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene__rings i,
+  .scene__status i {
+    animation: none;
+  }
+  .scene__rings i {
+    opacity: 0.16;
+    transform: scale(1.6);
+  }
+}
+
+/* The illustration is the first thing to go when the panel gets short. */
+@media (max-height: 760px) {
+  .hero__middle {
+    display: none;
+  }
+}
+
+/*
+ * A screen that lays itself out to the window instead of being a centred form.
+ *
+ * The Backup Center is a settings surface: its heading, totals, protected
+ * folders and buttons each have one place and must stay there. Letting the
+ * page scroll moved all of them at once — scrolling to reach a folder pushed
+ * the buttons off, which is the opposite of what a settings window should do.
+ *
+ * So the page does not scroll at all here. The screen fills the window and
+ * scrolls exactly one list inside itself.
+ */
+.shell__body--fill {
+  overflow: hidden;
+  justify-content: stretch;
+  align-items: stretch;
+  padding: 8px 0 0;
+}
+
+.shell__content--fill {
+  max-width: 660px;
+  margin: 0 auto;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}

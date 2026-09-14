@@ -1,0 +1,77 @@
+[package]
+name = "arciin-desktop"
+version = "0.1.0"
+description = "Arciin Desktop"
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+name = "arciin_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `unstable` unlocks multi-webview windows. The Arciin window needs two: the
+# server's own page, and a small overlay of ours holding the window controls.
+# The controls cannot live in the server's page because this client never
+# injects script into a remote origin.
+tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "rt", "fs", "io-util", "macros"] }
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-native-roots",
+    "multipart",
+    "stream",
+] }
+keyring = { version = "3", features = ["windows-native"] }
+mdns-sd = "0.13"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+gethostname = "1"
+
+# --- Computer backup ---
+# Local sync state. `bundled` compiles SQLite itself, so the installer does not
+# depend on a system library being present.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Stable per-entry identity. v4 only: never derived from hardware or path.
+uuid = { version = "1", features = ["v4"] }
+# Directory walking with explicit control over symlink/reparse-point handling.
+walkdir = "2"
+# Filesystem watching. `notify` uses ReadDirectoryChangesW on Windows; the
+# debouncer coalesces the burst of events a single save produces.
+notify = "8"
+notify-debouncer-full = "0.6"
+# Content hashing, only where the protocol or change-detection needs it.
+sha2 = "0.10"
+# Retry jitter.
+rand = "0.9"
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[target.'cfg(windows)'.dependencies]
+# Must match the versions tauri/wry link against, or the COM interface
+# types returned by PlatformWebview::controller() are a different crate.
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    # Known Folder resolution: user profile locations are never hard-coded.
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,17 @@
+# Normalise line endings so a Windows checkout and a Linux CI runner agree.
+# Without this, every file committed from Windows shows as modified elsewhere.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF: PowerShell is happier, and they never run on
+# a Linux runner.
+*.ps1 text eol=crlf
+
+# Binary. Never touched by line-ending conversion or diffed as text — which is
+# also what stops a text tool from being pointed at them by accident.
+*.png binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.exe binary

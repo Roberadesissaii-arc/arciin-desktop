@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Black rounded-square background -->
+  <rect width="512" height="512" rx="108" fill="#000000"/>
+
+  <!-- Full arch in orange -->
+  <polyline
+    points="152,400 256,108 360,400"
+    fill="none"
+    stroke="#FF4F12"
+    stroke-width="70"
+    stroke-linejoin="round"
+    stroke-linecap="round"
+  />
+</svg>

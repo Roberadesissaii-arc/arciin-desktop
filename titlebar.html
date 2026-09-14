@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    />
+    <title>Arciin window controls</title>
+    <style>
+      /*
+       * The window controls for the Arciin window.
+       *
+       * They live in their own tiny webview, overlaid on the server's page,
+       * because this client never injects script into a remote origin. The
+       * page underneath belongs to the server; this strip belongs to us, and
+       * the two never touch.
+       *
+       * Sized and shaped to match what Windows itself draws, so it reads as
+       * the system's chrome rather than a web widget: 46x32 hit targets, the
+       * same hover greys, and a close button that goes red.
+       */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+        /*
+         * The same near-black as Arciin's sidebar (`--sidebar` / `--background`
+         * in the web app's globals.css).
+         *
+         * That is what makes the sidebar read as running the full height: the
+         * strip and the sidebar are one continuous colour, so the only stretch
+         * that registers as a title bar is the part above the light content
+         * pane, which is exactly where the window controls live.
+         *
+         * Not transparent: two sibling WebView2 instances do not composite on
+         * Windows, so a transparent overlay renders as nothing at all.
+         */
+        background: #09090b;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      .bar {
+        display: flex;
+        align-items: stretch;
+        justify-content: flex-end;
+        height: 100%;
+      }
+
+      /* Everything left of the buttons drags the window, the way the empty
+         part of a real title bar does. */
+      .drag {
+        flex: 1 1 auto;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+
+      button {
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+        width: 46px;
+        border: 0;
+        background: transparent;
+        color: rgba(255, 255, 255, 0.82);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: default;
+        transition: background-color 0.12s ease;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.09);
+      }
+
+      button:active {
+        background: rgba(255, 255, 255, 0.14);
+      }
+
+      /* The one Windows convention worth keeping exactly: close turns red. */
+      .close:hover {
+        background: #c42b1c;
+        color: #ffffff;
+      }
+
+      .close:active {
+        background: #b0271a;
+      }
+
+      svg {
+        display: block;
+      }
+
+      /* Hidden until the maximize state is known, so the icon never flips
+         visibly on first paint. */
+      .restore {
+        display: none;
+      }
+
+      body.maximized .maximize {
+        display: none;
+      }
+
+      body.maximized .restore {
+        display: inline-flex;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        button {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <div class="drag"></div>
+
+      <button id="minimize" type="button" title="Minimize" aria-label="Minimize">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M0 5h10" stroke="currentColor" stroke-width="1" />
+        </svg>
+      </button>
+
+      <button id="maximize" class="maximize" type="button" title="Maximize" aria-label="Maximize">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <rect
+            x="0.5"
+            y="0.5"
+            width="9"
+            height="9"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1"
+          />
+        </svg>
+      </button>
+
+      <button id="restore" class="restore" type="button" title="Restore" aria-label="Restore">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <rect
+            x="0.5"
+            y="2.5"
+            width="7"
+            height="7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1"
+          />
+          <path d="M2.5 2.5V0.5H9.5V7.5H7.5" fill="none" stroke="currentColor" stroke-width="1" />
+        </svg>
+      </button>
+
+      <button id="close" class="close" type="button" title="Close" aria-label="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1" />
+        </svg>
+      </button>
+    </div>
+
+    <script type="module">
+      import { getCurrentWindow } from "@tauri-apps/api/window"
+
+      const appWindow = getCurrentWindow()
+
+      /** Keep the maximize/restore icon honest, including after a double-click drag. */
+      async function syncMaximized() {
+        try {
+          document.body.classList.toggle("maximized", await appWindow.isMaximized())
+        } catch {
+          // Not fatal: the wrong icon is better than a broken title bar.
+        }
+      }
+
+      document.getElementById("minimize").addEventListener("click", () => {
+        void appWindow.minimize()
+      })
+
+      for (const id of ["maximize", "restore"]) {
+        document.getElementById(id).addEventListener("click", async () => {
+          await appWindow.toggleMaximize()
+          await syncMaximized()
+        })
+      }
+
+      document.getElementById("close").addEventListener("click", () => {
+        void appWindow.close()
+      })
+
+      void appWindow.onResized(syncMaximized)
+      void syncMaximized()
+
+    </script>
+  </body>
+</html>

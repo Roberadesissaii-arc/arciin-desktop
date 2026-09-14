@@ -1,0 +1,53 @@
+# --- Generated output ----------------------------------------------------
+node_modules/
+dist/
+build/
+.next/
+.vite/
+
+# Rust / Tauri build and codegen
+src-tauri/target/
+src-tauri/gen/
+
+# Installer artefacts are published as release assets, never committed.
+*.msi
+*.nsis
+*-setup.exe
+
+# --- Secrets and signing material ----------------------------------------
+#
+# This repository is public. Nothing below may ever be committed.
+#
+# `*.pem` and `*.key` are ignored wholesale: the tree was audited and holds
+# no legitimate public certificate or key fixture, so the pattern costs
+# nothing and closes an easy mistake. If a public cert is ever needed as a
+# tracked fixture, add it with an explicit negation rather than loosening
+# these.
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+certs/private/
+signing/
+
+# --- Local runtime state -------------------------------------------------
+#
+# The sync database holds local absolute paths. It holds no credential, but
+# it is per-machine and has no business in source control.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.log
+
+# --- Editors / OS --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+release/

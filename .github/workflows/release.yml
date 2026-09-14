@@ -1,0 +1,141 @@
+# Builds the Windows installer and attaches it to a DRAFT release.
+#
+# Two deliberate safety properties:
+#
+#   1. It never runs on a push to main. Only an explicit `desktop-v*` tag, or a
+#      manual dispatch, can produce an artifact. Shipping should be a decision,
+#      not a side effect of merging.
+#   2. The release it creates is a DRAFT. A draft is invisible to the public
+#      and its assets are not downloadable, so an installer cannot become the
+#      website's download by accident. Publishing stays a human action.
+name: Release (draft)
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Windows x64 installer
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check version consistency
+        run: node scripts/check-version.mjs
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The same gate CI applies. A tag must not be able to ship something that
+      # would have failed on a pull request.
+      - name: Frontend types
+        run: npm run typecheck
+      - name: Frontend tests
+        run: npm test
+      - name: Rust format
+        run: cargo fmt --check
+        working-directory: src-tauri
+      - name: Rust lint
+        run: cargo clippy --all-targets
+        working-directory: src-tauri
+      - name: Rust tests
+        run: cargo test
+        working-directory: src-tauri
+
+      - name: Build installer
+        run: npm run tauri:build
+
+      # --- Authenticode signing ------------------------------------------
+      #
+      # Not configured. The step below is the interface a real certificate
+      # plugs into, and it is skipped entirely while the secret is absent — so
+      # the pipeline works today and does not pretend the artifact is signed.
+      #
+      # To enable, add repository secrets:
+      #   WINDOWS_CERTIFICATE           base64-encoded .pfx
+      #   WINDOWS_CERTIFICATE_PASSWORD  its password
+      #
+      # Never commit either. See docs/RELEASE.md.
+      - name: Sign installer
+        if: ${{ env.WINDOWS_CERTIFICATE != '' }}
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          try {
+            $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe |
+              Select-Object -First 1
+            & signtool sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      # Reports honestly which kind of artifact this is, and refuses to call an
+      # unsigned build signed.
+      - name: Verify signature
+        id: verify
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe |
+            Select-Object -First 1
+          $sig = Get-AuthenticodeSignature $installer.FullName
+          if ($sig.Status -eq "Valid") {
+            "signed=true" >> $env:GITHUB_OUTPUT
+            Write-Output "SIGNED: $($sig.SignerCertificate.Subject)"
+          } else {
+            "signed=false" >> $env:GITHUB_OUTPUT
+            Write-Output "UNSIGNED development artifact (status: $($sig.Status))"
+          }
+
+      - name: Generate release metadata
+        run: node scripts/release-metadata.mjs
+        env:
+          ARCIIN_SIGNED: ${{ steps.verify.outputs.signed }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arciin-desktop-windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            release/desktop-windows.json
+          if-no-files-found: error
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Draft, always. Publishing is a separate, human decision — and the
+          # public download must not change until the release gate in
+          # docs/RELEASE.md is met.
+          draft: true
+          prerelease: true
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            release/desktop-windows.json
