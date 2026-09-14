@@ -152,6 +152,16 @@ export function backupRemoveRoot(rootId: string): Promise<BackupState> {
   return call<BackupState>("backup_remove_root", { rootId })
 }
 
+/**
+ * Protect a folder again that was switched off.
+ *
+ * The same root, reactivated — not a new one. Nothing is duplicated on the
+ * server and the files already stored under it are not re-sent.
+ */
+export function backupResumeRoot(rootId: string): Promise<BackupState> {
+  return call<BackupState>("backup_resume_root", { rootId })
+}
+
 /** Open a protected folder in File Explorer, resolved natively by id. */
 export function backupOpenRoot(rootId: string): Promise<void> {
   return call<void>("backup_open_root", { rootId })
@@ -175,6 +185,17 @@ export function sizeForBackupCenter(): Promise<void> {
 /** Turn backup off on this computer. Local files are never touched. */
 export function backupForget(): Promise<void> {
   return call<void>("backup_forget")
+}
+
+/**
+ * Turn backup back on for a computer that was switched off.
+ *
+ * Reuses the existing profile, so the computer keeps its identity and its
+ * stored files. Folders come back listed but not protected; each is resumed
+ * deliberately with {@link backupResumeRoot}.
+ */
+export function backupReenable(): Promise<BackupState> {
+  return call<BackupState>("backup_reenable")
 }
 
 /**

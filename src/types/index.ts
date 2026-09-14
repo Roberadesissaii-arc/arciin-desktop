@@ -160,6 +160,15 @@ export type ProtectedRoot = {
    * the server's page, which has no IPC at all.
    */
   localPath: string
+  /**
+   * Whether that folder is still on this PC.
+   *
+   * A root outlives the folder it points at: somebody deletes the folder, or
+   * unplugs the drive. The server keeps the files and the record of where they
+   * came from, so the screen has to be able to say the folder is gone — and
+   * must not offer to open it.
+   */
+  localPathExists: boolean
   fileCount: number
   pending: number
   failed: number
@@ -172,8 +181,19 @@ export type ProtectedRoot = {
  * Note what is absent: the `arcsync_` credential. No command returns it, and
  * there is no field here it could arrive in.
  */
+/**
+ * Where this computer stands with its server's backup.
+ *
+ * Three states, not two. `NOT_SET_UP` and `DISABLED` used to look identical to
+ * the UI, which is what made stopping backup a one-way door: a computer that
+ * had been switched off was indistinguishable from one that had never been set
+ * up, so the only route back was to start over and build a second tree.
+ */
+export type BackupLifecycle = "NOT_SET_UP" | "ACTIVE" | "DISABLED"
+
 export type BackupState = {
   enabled: boolean
+  lifecycle: BackupLifecycle
   status?: BackupStatus
   roots: ProtectedRoot[]
   activation?: ActivationStage

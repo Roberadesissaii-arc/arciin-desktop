@@ -10,10 +10,11 @@
  * Settings in this application.
  */
 
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { KeyRound, Network, ShieldCheck } from "lucide-react"
 
 import { HeroWordmark, Wordmark } from "@/components/brand"
+import { FooterNoteSlot } from "@/components/footer-note"
 import { HeroConnection } from "@/components/hero-connection"
 import { Status } from "@/components/ui"
 import { ConnectingScreen } from "@/features/connection/ConnectingScreen"
@@ -21,7 +22,6 @@ import { DisconnectedScreen } from "@/features/connection/DisconnectedScreen"
 import { ManualScreen } from "@/features/discovery/ManualScreen"
 import { SearchScreen } from "@/features/discovery/SearchScreen"
 import { PairingScreen } from "@/features/pairing/PairingScreen"
-import { BackupSettingsScreen } from "@/features/backup/BackupSettingsScreen"
 import { BackupCenterScreen } from "@/features/backup/BackupCenterScreen"
 import { ProtectFoldersScreen } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
@@ -64,7 +64,12 @@ export function App() {
     return () => dispose?.()
   }, [])
 
+  // The footer's middle slot. State rather than a plain ref, because screens
+  // portal into it and must re-render once it exists.
+  const [noteSlot, setNoteSlot] = useState<HTMLElement | null>(null)
+
   return (
+    <FooterNoteSlot.Provider value={noteSlot}>
     <div className="shell">
       <main className="shell__main">
         <Wordmark />
@@ -73,9 +78,16 @@ export function App() {
             <Step step={step} />
           </div>
         </div>
+        {/*
+          One row, three places. The middle one is filled by whichever screen
+          is showing; see components/footer-note.
+        */}
         <footer className="shell__footer">
-          <span>Copyright &copy; 2026 Arciin.</span>
-          <span>Arciin Desktop {__APP_VERSION__}</span>
+          <span className="shell__footer__end">Copyright &copy; 2026 Arciin.</span>
+          <span className="shell__footer__note" ref={setNoteSlot} />
+          <span className="shell__footer__end shell__footer__end--right">
+            Arciin Desktop {__APP_VERSION__}
+          </span>
         </footer>
       </main>
 
@@ -114,6 +126,7 @@ export function App() {
         </div>
       </aside>
     </div>
+    </FooterNoteSlot.Provider>
   )
 }
 
@@ -127,8 +140,6 @@ function Step({ step }: { step: ReturnType<typeof useOnboarding.getState>["step"
       return <PairingScreen />
     case "connecting":
       return <ConnectingScreen />
-    case "backupSettings":
-      return <BackupSettings />
     case "disconnected":
       return <DisconnectedScreen />
     case "protectFolders":
@@ -160,15 +171,11 @@ function BackupCenter() {
     <BackupCenterScreen
       deviceName={deviceName}
       onClose={close}
-      // Backup stopped: there is nothing left to manage, so the next visit
-      // should offer setup again rather than an empty Backup Center.
+      // Backup stopped. The next visit comes back here, not to setup: the
+      // profile still exists on the server in a disabled state, and the
+      // Backup Center is what offers it back.
       onStopped={close}
     />
   )
 }
 
-/** The native backup status screen, with its way back. */
-function BackupSettings() {
-  const skipBackup = useOnboarding((state) => state.skipBackup)
-  return <BackupSettingsScreen onBack={skipBackup} />
-}

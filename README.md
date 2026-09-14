@@ -42,6 +42,13 @@ folder lives on this PC, how much has been stored, and your server's remaining
 disk space. Add folders, stop protecting one, pause, resume, or stop backup
 entirely — without disconnecting the device.
 
+**Stopping is not a one-way door.** Turning backup off disables the profile on
+your server and revokes this computer's backup credential, and the client
+remembers which folders were protected so it can offer them back. Turning
+backup on again reuses the same profile with a freshly issued credential, and
+resuming a folder reactivates the folder that was already there rather than
+building a second copy of it beside the first.
+
 ## Current status
 
 | Area | State |
@@ -52,6 +59,7 @@ entirely — without disconnecting the device.
 | Native WebView shell | Working |
 | Computer Backup — initial backup | Working |
 | Backup Center — add, remove, pause, resume, stop | Working |
+| Stop and re-enable backup (server-authoritative) | Working |
 | Windows installer (NSIS) | Working |
 | **Continuous filesystem watcher** | **Not complete** |
 | **Reconciliation after offline changes** | **Not complete** |

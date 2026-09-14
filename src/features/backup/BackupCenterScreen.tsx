@@ -26,16 +26,18 @@ import {
   FolderPlus,
   Pause,
   Play,
+  RotateCcw,
   ShieldCheck,
   X,
 } from "lucide-react"
 
+import { FooterNote } from "@/components/footer-note"
 import { useVisibleRowCap } from "@/components/row-cap"
 import { ScrollHint, useScrollHint } from "@/components/scroll"
 import { Button, LinkButton, Message } from "@/components/ui"
 import { HealthBadge } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
-import { formatBytes, formatCount } from "@/lib/format"
+import { describeDormantFolder, formatBytes, formatCount } from "@/lib/format"
 import type {
   AppError,
   BackupState,
@@ -109,10 +111,22 @@ export function BackupCenterScreen({
   }
 
   const status = state?.status
-  const roots = (state?.roots ?? []).filter((root) => root.enabled)
-  // A known folder already protected must not be offered a second time.
-  const protectedKinds = new Set(roots.map((root) => root.kind))
-  const available = known.filter((folder) => !protectedKinds.has(folder.kind))
+  // One list, protected folders first.
+  //
+  // A folder that was switched off is still one of this computer's folders —
+  // the server holds its files and resuming it reuses the same root — so it
+  // belongs in the same box, carrying its state in its own row. Giving it a
+  // box of its own is what stopped the screen fitting and brought back the
+  // page-length scrollbar that bounding these lists was meant to remove.
+  const all = state?.roots ?? []
+  const roots = [
+    ...all.filter((root) => root.enabled),
+    ...all.filter((root) => !root.enabled),
+  ]
+  // A known folder already on the list must not be offered a second time —
+  // including a switched-off one, which has its own Resume control in place.
+  const listedKinds = new Set(all.map((root) => root.kind))
+  const available = known.filter((folder) => !listedKinds.has(folder.kind))
 
   // Two lists, two boxes, scrolling independently on purpose. Sharing one
   // region meant reaching a folder in one list dragged the other along with
@@ -122,6 +136,22 @@ export function BackupCenterScreen({
   const protectedScroll = useScrollHint<HTMLUListElement>(roots.length)
   const availableCap = useVisibleRowCap(available.length, 0)
   const availableScroll = useScrollHint<HTMLUListElement>(available.length)
+
+  // Backup is off server-side. A different screen, not a disabled version of
+  // this one: none of the controls below mean anything until it is back on,
+  // and the only honest thing to say is what happened and how to undo it.
+  if (state?.lifecycle === "DISABLED") {
+    return (
+      <BackupOffScreen
+        deviceName={deviceName}
+        folders={state.roots}
+        busy={busy}
+        error={error}
+        onTurnBackOn={() => void run(ipc.backupReenable)}
+        onClose={onClose}
+      />
+    )
+  }
 
   return (
     <div className="backup-center">
@@ -152,8 +182,13 @@ export function BackupCenterScreen({
 
       <section>
         <div className="row row--between" style={{ marginBottom: 6 }}>
+          {/*
+            Not "Protected folders" any more: the list can hold folders that
+            are switched off, and a heading that called those protected would
+            be wrong in the one place people look to check.
+          */}
           <p className="section-label" style={{ margin: 0 }}>
-            Protected folders
+            Your folders
           </p>
           <LinkButton
             onClick={() =>
@@ -200,26 +235,61 @@ export function BackupCenterScreen({
                     {root.localPath}
                   </span>
                   <span className="folder__meta">
-                    {formatCount(root.fileCount)} files &middot;{" "}
-                    {formatBytes(root.bytesSynced)}
-                    {root.pending > 0 ? ` · ${formatCount(root.pending)} pending` : ""}
-                    {root.failed > 0 ? ` · ${formatCount(root.failed)} failed` : ""}
+                    {root.enabled ? (
+                      <>
+                        {formatCount(root.fileCount)} files &middot;{" "}
+                        {formatBytes(root.bytesSynced)}
+                        {root.pending > 0
+                          ? ` · ${formatCount(root.pending)} pending`
+                          : ""}
+                        {root.failed > 0 ? ` · ${formatCount(root.failed)} failed` : ""}
+                      </>
+                    ) : (
+                      // What is actually on the server, per folder. A blanket
+                      // "still stored on your server" would be a lie for a
+                      // folder switched off before anything uploaded.
+                      <>Not protected &middot; {describeDormantFolder(root)}</>
+                    )}
                   </span>
                 </span>
                 <span className="row" style={{ gap: 4 }}>
-                  <LinkButton
-                    onClick={() => void ipc.backupOpenRoot(root.id)}
-                    title="Open this folder in File Explorer"
-                  >
-                    <FolderOpen size={13} aria-hidden />
-                  </LinkButton>
-                  <LinkButton
-                    onClick={() => setRemoving(root)}
-                    title="Stop backing up this folder"
-                    disabled={busy}
-                  >
-                    <X size={13} aria-hidden />
-                  </LinkButton>
+                  {/*
+                    Offered only when there is something to open. A root
+                    outlives the folder it points at, and an Open Folder that
+                    fails in Explorer is worse than no button at all.
+                  */}
+                  {root.localPathExists ? (
+                    <LinkButton
+                      onClick={() => void ipc.backupOpenRoot(root.id)}
+                      title="Open this folder in File Explorer"
+                    >
+                      <FolderOpen size={13} aria-hidden />
+                    </LinkButton>
+                  ) : null}
+                  {root.enabled ? (
+                    <LinkButton
+                      onClick={() => setRemoving(root)}
+                      title="Stop backing up this folder"
+                      disabled={busy}
+                    >
+                      <X size={13} aria-hidden />
+                    </LinkButton>
+                  ) : (
+                    <LinkButton
+                      onClick={() => void run(() => ipc.backupResumeRoot(root.id))}
+                      title={
+                        root.localPathExists
+                          ? "Protect this folder again — the same folder, not a second copy"
+                          : "This folder is no longer on this PC"
+                      }
+                      // Nothing to resume from: the folder is gone. The record
+                      // and the stored files stay — this is history, not an
+                      // error to clear — but there is nothing to scan.
+                      disabled={busy || !root.localPathExists}
+                    >
+                      <RotateCcw size={13} aria-hidden />
+                    </LinkButton>
+                  )}
                 </span>
               </div>
             </li>
@@ -258,12 +328,17 @@ export function BackupCenterScreen({
             >
               {available.map((folder) => (
                 <li key={folder.id}>
-                  <button
-                    type="button"
-                    className="folder"
-                    disabled={busy}
-                    onClick={() => void run(() => ipc.backupEnable([folder.id]))}
-                  >
+                  {/*
+                    The row is not the control; the button is.
+
+                    It used to be one big <button>, so anywhere on the card
+                    started backing up a folder — including the folder name and
+                    the path, which are the parts you reach for when you are
+                    reading rather than choosing. Protecting a folder can mean
+                    uploading a very great deal, so it should take pressing the
+                    thing that says Add.
+                  */}
+                  <div className="folder">
                     <span className="folder__icon" aria-hidden>
                       <FolderClosed size={16} />
                     </span>
@@ -271,10 +346,16 @@ export function BackupCenterScreen({
                       <span className="folder__name">{folder.displayName}</span>
                       <span className="folder__meta">Not backed up</span>
                     </span>
-                    <span className="btn-link btn-link--accent" aria-hidden>
+                    <Button
+                      compact
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => void run(() => ipc.backupEnable([folder.id]))}
+                      aria-label={`Back up ${folder.displayName}`}
+                    >
                       Add
-                    </span>
-                  </button>
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -371,10 +452,111 @@ export function BackupCenterScreen({
         )}
       </div>
 
-      <p className="privacy-note">
-        <ShieldCheck size={14} aria-hidden />
-        Copied to your own server. Nothing is ever deleted from this PC.
+      <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
+    </div>
+  )
+}
+
+/**
+ * What a computer whose backup has been turned off is shown.
+ *
+ * The state this replaces had no screen at all: stopping backup deleted the
+ * local profile, so the computer looked like one that had never been set up
+ * and the only route back was first-run setup — which built a second tree
+ * beside the files already on the server. Backup being off is a setting, and a
+ * setting needs somewhere to say so and a way back.
+ *
+ * Three things are worth saying plainly here, because each is a thing people
+ * reasonably fear has happened: the files are still on the server, nothing on
+ * this PC was touched, and the computer is still paired.
+ */
+function BackupOffScreen({
+  deviceName,
+  folders,
+  busy,
+  error,
+  onTurnBackOn,
+  onClose,
+}: {
+  deviceName: string
+  folders: ProtectedRoot[]
+  busy: boolean
+  error: AppError | null
+  onTurnBackOn: () => void
+  onClose: () => void
+}) {
+  return (
+    <div className="backup-center">
+      <div className="row row--between">
+        <div>
+          <h1 className="title" style={{ textAlign: "left", fontSize: 21 }}>
+            Computer Backup
+          </h1>
+          <p style={{ margin: "4px 0 0", fontSize: 12.5, color: "var(--text-secondary)" }}>
+            {deviceName} &middot; backup is off
+          </p>
+        </div>
+      </div>
+
+      <div className="card stack stack--tight">
+        <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
+          <strong>Backup is off for this computer.</strong>
+        </p>
+        <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+          Everything already backed up is <strong>still on your Arciin
+          server</strong> and nothing on this PC was deleted. This computer is
+          still paired &mdash; only the background backup stopped.
+        </p>
+      </div>
+
+      {error ? <Message>{error.message}</Message> : null}
+
+      {folders.length > 0 ? (
+        <section>
+          <p className="section-label">Previously protected</p>
+          <ul className="folders">
+            {folders.map((root) => (
+              <li key={root.id}>
+                <div className="folder folder--loading">
+                  <span className="folder__icon" aria-hidden>
+                    <FolderClosed size={16} />
+                  </span>
+                  <span className="folder__text">
+                    <span className="folder__name">{root.displayName}</span>
+                    <span className="folder__path" title={root.localPath}>
+                      {root.localPath}
+                    </span>
+                    <span className="folder__meta">{describeDormantFolder(root)}</span>
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <div className="row" style={{ gap: 8 }}>
+        <Button compact onClick={onTurnBackOn} disabled={busy}>
+          <ShieldCheck size={14} aria-hidden />
+          {busy ? "Turning on…" : "Turn Backup Back On"}
+        </Button>
+        <Button compact variant="secondary" onClick={onClose}>
+          Done
+        </Button>
+      </div>
+
+      {/*
+        Said here because turning backup on is not the same as protecting every
+        folder again: uploading is resumed folder by folder, deliberately. A
+        computer that switched backup off because a huge folder was filling the
+        server must not have that folder start again on its own.
+      */}
+      <p style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+        Turning backup on doesn&rsquo;t start uploading again on its own.
+        You&rsquo;ll choose which folders to resume.
       </p>
+
+      <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
     </div>
   )
 }

@@ -507,7 +507,16 @@
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.folder:hover:not(:disabled) {
+/*
+ * Only rows that are themselves buttons light up.
+ *
+ * The folder picker's rows toggle, so the whole row is the control and should
+ * respond. The management lists' rows do not: they report, and their controls
+ * sit at the right-hand end. Lighting those up on hover promises a click that
+ * does nothing — which is how "Add" ended up being the entire card, where
+ * reaching for the folder name started an upload.
+ */
+button.folder:hover:not(:disabled) {
   border-color: #e0e0e0;
   background: #fcfcfc;
 }
@@ -966,14 +975,17 @@
    is what allows a flex child to be shorter than its content and scroll. */
 
 
-.backup-center__list {
-  flex: 1 1 auto;
-  /* Takes exactly the height left over, and no more. A pixel floor here was
-     worse than nothing: when the fixed parts were taller than expected the
-     list overflowed its column and the buttons ended up drawn on top of the
-     last row. The window height is what makes that leftover about four rows. */
-  min-height: 0;
-}
+/*
+ * One container per list, and the page itself never scrolls.
+ *
+ * There is no outer scrolling region here on purpose. An earlier attempt gave
+ * the folder sections their own scrollbar so a third section would fit; that
+ * put a second, page-length scrollbar next to the per-list ones and made the
+ * whole screen scroll, which is exactly what bounding the lists was for. The
+ * answer was to stop adding a third box: folders that are not currently
+ * protected are rows in the same list as the protected ones, not a list of
+ * their own.
+ */
 
 
 

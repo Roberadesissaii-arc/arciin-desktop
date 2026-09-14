@@ -104,6 +104,31 @@ impl ActivationStage {
     }
 }
 
+/// What a reconciliation against the server concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reconciled {
+    /// The server still has this computer backing up.
+    Active,
+    /// The server has turned it off, or the grant is gone.
+    Disabled,
+    /// The server could not be asked. Not the same as being told no.
+    Unknown,
+}
+
+/// Where this computer stands with its server's backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Lifecycle {
+    /// Backup has never been set up here, or the device was unpaired.
+    NotSetUp,
+    /// The server has backup on for this computer.
+    Active,
+    /// The server has backup off. The files already stored stay stored, the
+    /// computer stays paired, and the folders it protected are remembered so
+    /// they can be offered back.
+    Disabled,
+}
+
 /// Emitted to the onboarding window as activation moves between stages.
 pub const ACTIVATION_EVENT: &str = "arciin://backup-activation";
 
@@ -147,7 +172,14 @@ pub struct BackupAvailability {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupState {
+    /// True only while backup is actually on. Kept as its own field because
+    /// almost every caller wants the plain question, not the three-way one.
     pub enabled: bool,
+    /// The three states the UI has to tell apart. `enabled` collapses the last
+    /// two, and collapsing them is what made stopping backup a dead end: a
+    /// computer that had been set up and switched off looked exactly like one
+    /// that had never been set up, so the only route back was to start again.
+    pub lifecycle: Lifecycle,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<EngineStatus>,
     pub roots: Vec<ProtectedRootView>,
@@ -175,6 +207,13 @@ pub struct ProtectedRootView {
     /// which is our own bundled UI. It never goes to the server, and never to
     /// the webview showing the server's page — that one has no IPC at all.
     pub local_path: String,
+    /// Whether that folder is still on this PC.
+    ///
+    /// A root outlives the folder it points at: somebody deletes the folder,
+    /// or unplugs the drive it was on, and the server keeps the files and the
+    /// record of where they came from. The screen has to be able to say so,
+    /// and must not offer to open a folder that is not there.
+    pub local_path_exists: bool,
     pub file_count: i64,
     pub pending: i64,
     pub failed: i64,
@@ -388,6 +427,9 @@ impl BackupManager {
         server_supports_backup: bool,
         signed_in: bool,
     ) -> Result<BackupAvailability, AppError> {
+        // "Already set up here", which includes a profile that has been
+        // switched off. Someone who deliberately stopped backup must not be
+        // handed first-run setup again on the next connection.
         let enabled = self.store(app)?.profile(server_id)?.is_some();
         Ok(BackupAvailability {
             supported: server_supports_backup,
@@ -486,11 +528,12 @@ impl BackupManager {
                 // is in the store must still be valid, or the user has to
                 // rotate — either way there is nothing to save.
                 if credentials.load_sync(server_id, &profile.id)?.is_none() {
-                    // The server keeps the profile when backup is stopped
-                    // locally, and only issues a credential when it creates
-                    // one. So a computer that stopped backup and deleted its
-                    // credential cannot talk its way back in from here — the
-                    // grant has to be reset on the server.
+                    // The server had a live grant and reissued nothing, but
+                    // this computer has no credential to use it with. That is
+                    // not the stop-backup case — stopping revokes the grant,
+                    // so the server reissues on the way back in — it is a
+                    // credential lost some other way, and the only honest
+                    // answer is to say so and let it be rotated.
                     let err = from_code("BACKUP_CREDENTIAL_INVALID");
                     self.fail(app, &err);
                     return Err(err);
@@ -504,6 +547,7 @@ impl BackupManager {
             device_id: profile.device_id.clone(),
             user_id: profile.user_id.clone(),
             paused: false,
+            enabled: true,
         })?;
 
         self.set_stage(app, ActivationStage::CreatingRoots);
@@ -651,11 +695,52 @@ impl BackupManager {
             return Ok(());
         };
 
+        if !profile.enabled {
+            // Backup was turned off before this launch. Nothing to resume, and
+            // nothing to ask the server about: the Backup Center already has
+            // what it needs to offer it back.
+            tracing::info!(server_id, "backup is off for this computer; not resuming");
+            return Ok(());
+        }
+
         tracing::info!(
             server_id,
             profile_id = %profile.profile_id,
             "resuming computer backup for a profile that already exists"
         );
+
+        // Ask the server what it thinks before acting on what we remember.
+        //
+        // The local database is a cache of the queue, not the authority on
+        // whether this computer is still allowed to back up. Backup can be
+        // turned off from another device, a grant revoked, a folder dropped —
+        // all of it while this app was closed. Resuming on stale local state
+        // means scanning folders nobody is protecting and then failing upload
+        // by upload, which reads as a broken client rather than a setting
+        // somebody changed.
+        match self.reconcile(app, credentials, server_id, origin).await {
+            Ok(Reconciled::Active) => {}
+            Ok(Reconciled::Disabled) => {
+                // Backup is off server-side. Drop the dead grant and stop —
+                // the pairing and every stored file stay exactly as they are.
+                tracing::info!(server_id, "backup is disabled on the server; not resuming");
+                self.disable_locally(app, credentials, server_id)?;
+                return Ok(());
+            }
+            Ok(Reconciled::Unknown) => {
+                // Offline or the server did not answer. Not a reason to throw
+                // away local state: carry on and let the engine's own error
+                // handling deal with it if the grant really is gone.
+                tracing::info!(
+                    server_id,
+                    "could not confirm backup state; resuming on local state"
+                );
+            }
+            Err(err) => {
+                self.fail(app, &err);
+                return Err(err);
+            }
+        }
 
         // Rescan first: a launch that was interrupted mid-scan has a partial
         // queue, and files change while the app is closed. `record` keeps the
@@ -826,11 +911,13 @@ impl BackupManager {
                 "BACKUP_DISABLED" | "BACKUP_CREDENTIAL_INVALID"
             ) {
                 if let Some(state) = tauri::Manager::try_state::<crate::AppState>(&handle) {
-                    // Drop the grant and its local queue, keep the pairing.
+                    // Drop the grant and its local queue, keep the pairing
+                    // and keep the folder list: backup was turned off, and
+                    // turning it back on has to be possible from here.
                     if let Err(cleanup) =
                         state
                             .backup
-                            .forget(&handle, state.credentials.as_ref(), &server)
+                            .disable_locally(&handle, state.credentials.as_ref(), &server)
                     {
                         tracing::warn!(code = %cleanup.code, "backup state could not be cleared");
                     }
@@ -870,12 +957,55 @@ impl BackupManager {
         let Some(profile) = store.profile(server_id)? else {
             return Ok(BackupState {
                 enabled: false,
+                lifecycle: Lifecycle::NotSetUp,
                 status: None,
                 roots: Vec::new(),
                 activation: self.stage(),
                 last_backup_at: None,
             });
         };
+
+        // Backup is off, but this computer has been set up before. Report the
+        // folders it used to protect — they are still on the server, and the
+        // screen offers them back rather than pretending nothing happened.
+        if !profile.enabled {
+            return Ok(BackupState {
+                enabled: false,
+                lifecycle: Lifecycle::Disabled,
+                status: None,
+                activation: self.stage(),
+                last_backup_at: store.last_synced_at(server_id)?,
+                roots: store
+                    .roots(server_id)?
+                    .into_iter()
+                    .map(|root| {
+                        // The real figures, not zeroes. How much of a folder
+                        // actually reached the server is the difference
+                        // between offering it back and misleading someone
+                        // about what is protected — a folder that was dropped
+                        // before anything uploaded has nothing stored, and
+                        // saying otherwise would be a lie in the one place
+                        // people go to check.
+                        let (files, _pending, _failed, bytes) = store
+                            .root_progress(server_id, &root.id)
+                            .unwrap_or((0, 0, 0, 0));
+                        ProtectedRootView {
+                            local_path_exists: local_folder_exists(&root.local_path),
+                            local_path: root.local_path.to_string_lossy().into_owned(),
+                            id: root.id,
+                            kind: root.kind,
+                            display_name: root.display_name,
+                            enabled: false,
+                            file_count: files,
+                            // Nothing is queued while backup is off.
+                            pending: 0,
+                            failed: 0,
+                            bytes_synced: bytes,
+                        }
+                    })
+                    .collect(),
+            });
+        }
 
         let (synced, outstanding, failed, bytes, pending_bytes) = store.progress(server_id)?;
         let paused = profile.paused;
@@ -889,6 +1019,7 @@ impl BackupManager {
 
         Ok(BackupState {
             enabled: true,
+            lifecycle: Lifecycle::Active,
             activation: self.stage(),
             last_backup_at: store.last_synced_at(server_id)?,
             status: Some(EngineStatus {
@@ -909,6 +1040,7 @@ impl BackupManager {
                         .root_progress(server_id, &root.id)
                         .unwrap_or((0, 0, 0, 0));
                     ProtectedRootView {
+                        local_path_exists: local_folder_exists(&root.local_path),
                         local_path: root.local_path.to_string_lossy().into_owned(),
                         id: root.id,
                         kind: root.kind,
@@ -930,13 +1062,32 @@ impl BackupManager {
     /// other root stay, the Device stays paired, the copy already on the
     /// server stays, and **nothing on this PC is touched**. Removing a folder
     /// from backup is not a request to delete it in either place.
-    pub fn remove_root(
+    pub async fn remove_root(
         &self,
         app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
         server_id: &str,
+        origin: &Url,
         root_id: &str,
     ) -> Result<BackupState, AppError> {
         let store = self.store(app)?;
+        let Some(profile) = store.profile(server_id)? else {
+            return Err(from_code("BACKUP_DISABLED"));
+        };
+        let Some(credential) = credentials.load_sync(server_id, &profile.profile_id)? else {
+            return Err(from_code("BACKUP_CREDENTIAL_INVALID"));
+        };
+
+        // The server first, and only then the local state.
+        //
+        // The other order is what this replaces: disabling locally and never
+        // telling the server left the two disagreeing — the server kept
+        // accepting writes for a root this computer had dropped, and the
+        // protected-folder count it reported never moved. A refusal now stops
+        // the whole operation instead of being silently absorbed.
+        let client = BackupClient::new(origin.clone(), credential);
+        client.disable_root(root_id).await?;
+
         store.disable_root(server_id, root_id)?;
         tracing::info!(server_id, root_id, "a folder is no longer being backed up");
         self.state(app, server_id)
@@ -963,7 +1114,243 @@ impl BackupManager {
     ///
     /// Local files are never touched, and pairing is left completely alone —
     /// the computer stays a trusted device.
-    pub fn forget(
+    pub async fn forget(
+        &self,
+        app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
+        server_id: &str,
+        origin: &Url,
+        session_cookie_header: &str,
+    ) -> Result<(), AppError> {
+        let store = self.store(app)?;
+        let profile = store.profile(server_id)?;
+
+        // Ask the server first. It disables the profile and revokes the grant,
+        // which is what actually makes this computer stop being able to back
+        // up — clearing the local copy alone would leave a live credential on
+        // the server that nothing was using.
+        if let Some(profile) = profile.as_ref() {
+            crate::backup::client::disable_profile(
+                origin,
+                session_cookie_header,
+                &profile.profile_id,
+            )
+            .await?;
+        }
+
+        // Only now is it safe to act locally. Note `disable_locally`, not
+        // `forget_locally`: the profile row and the list of folders survive,
+        // because they are exactly what the offer to turn backup back on is
+        // made of. Deleting them is what made stopping a one-way door.
+        self.disable_locally(app, credentials, server_id)?;
+
+        tracing::info!(
+            server_id,
+            "computer backup turned off; device still paired and server files kept"
+        );
+        Ok(())
+    }
+
+    /// What the server says about this computer's backup.
+    ///
+    /// `Unknown` is deliberately distinct from `Disabled`: being unable to ask
+    /// is not the same as being told no, and treating a flat Wi-Fi as a
+    /// revoked grant would tear down a working setup.
+    async fn reconcile(
+        &self,
+        app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
+        server_id: &str,
+        origin: &Url,
+    ) -> Result<Reconciled, AppError> {
+        let store = self.store(app)?;
+        let Some(profile) = store.profile(server_id)? else {
+            return Ok(Reconciled::Disabled);
+        };
+        let Some(credential) = credentials.load_sync(server_id, &profile.profile_id)? else {
+            // No credential means no grant to check with — and no way back
+            // without the user authorising again.
+            return Ok(Reconciled::Disabled);
+        };
+
+        let client = BackupClient::new(origin.clone(), credential);
+        let server_profile = match client.me().await {
+            Ok(profile) => profile,
+            Err(err) => match classify_reconcile_failure(&err.code) {
+                Reconciled::Disabled => return Ok(Reconciled::Disabled),
+                Reconciled::Unknown => return Ok(Reconciled::Unknown),
+                // A revoked *device* is a different matter entirely, and is
+                // handled by the trust watchdog rather than quietly here.
+                Reconciled::Active => return Err(err),
+            },
+        };
+
+        if !profile_is_on(&server_profile.status) {
+            return Ok(Reconciled::Disabled);
+        }
+
+        // Roots the server no longer protects must stop being scanned here,
+        // however healthy they look in the local cache.
+        let local_roots = store.roots(server_id)?;
+        for root_id in roots_to_drop(&local_roots, &server_profile.roots) {
+            tracing::info!(
+                server_id,
+                root_id = %root_id,
+                "the server no longer protects this folder; dropping it locally"
+            );
+            store.disable_root(server_id, &root_id)?;
+        }
+
+        // Anything still queued for a folder that is not being backed up is
+        // stale by definition, and nothing else will ever remove it.
+        match store.purge_queue_for_disabled_roots(server_id) {
+            Ok(0) => {}
+            Ok(swept) => tracing::info!(
+                server_id,
+                swept,
+                "dropped queued work left behind by folders that are no longer protected"
+            ),
+            Err(err) => tracing::warn!(code = %err.code, "stale queue could not be swept"),
+        }
+
+        Ok(Reconciled::Active)
+    }
+
+    /// Erase this computer's backup state entirely, without telling the server.
+    ///
+    /// For revocation only: the device is no longer paired, so the profile id
+    /// refers to something this computer can no longer reach and there is no
+    /// re-enable to offer. Turning backup *off* uses `disable_locally`, which
+    /// keeps the folder list. Local files are never touched either way.
+    ///
+    /// For the cases where the server has *already* stopped it and is telling
+    /// us so: backup disabled from another device, a revoked grant, or the
+    /// whole Device being revoked. Calling the disable endpoint in those cases
+    /// would be pointless at best — and with a revoked device there is no
+    /// longer any credential to call it with.
+    ///
+    /// Local files are untouched, and the pairing is left alone: unpairing is
+    /// a separate decision handled elsewhere.
+    /// Turn backup back on for a profile the server has disabled.
+    ///
+    /// The profile is reused, so the computer keeps its identity on the server
+    /// and the folders it protected keep theirs. They come back **disabled**:
+    /// re-enabling backup is a decision about this computer, not a decision to
+    /// restart uploading every folder that was ever protected. Each one is
+    /// resumed separately, by `resume_root`.
+    pub async fn reenable(
+        &self,
+        app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
+        server_id: &str,
+        origin: &Url,
+        session_cookie_header: &str,
+    ) -> Result<BackupState, AppError> {
+        let store = self.store(app)?;
+        let Some(profile) = store.profile(server_id)? else {
+            // Nothing to re-enable. The caller should be running setup.
+            return Err(from_code("BACKUP_NOT_FOUND"));
+        };
+
+        let outcome = crate::backup::client::enable_profile(
+            origin,
+            session_cookie_header,
+            &profile.profile_id,
+        )
+        .await?;
+
+        // The server rotates the credential on every re-enable, so the one
+        // this computer held is already dead. Store the replacement before
+        // recording that backup is on: a profile marked enabled with no
+        // credential is the state that produced the original dead end.
+        let Some(credential) = outcome.into_credential() else {
+            tracing::error!(server_id, "backup was re-enabled without a credential");
+            return Err(from_code("BACKUP_CREDENTIAL_INVALID"));
+        };
+        credentials.save_sync(server_id, &profile.profile_id, &credential)?;
+        drop(credential);
+
+        store.enable_profile(server_id)?;
+        tracing::info!(
+            server_id,
+            profile_id = %profile.profile_id,
+            "computer backup turned back on"
+        );
+
+        // Nothing is protected yet, so there is nothing for the engine to do.
+        // It starts when the first folder is resumed.
+        refresh_computers_page(app);
+        self.state(app, server_id)
+    }
+
+    /// Protect one folder again, on a profile that is already on.
+    ///
+    /// The root keeps its server-side identity - it is the same `SyncRoot`,
+    /// matched by id - so nothing is duplicated in the computer's hierarchy
+    /// and the files already stored under it stay where they are.
+    pub async fn resume_root(
+        &self,
+        app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
+        server_id: &str,
+        origin: &Url,
+        root_id: &str,
+    ) -> Result<BackupState, AppError> {
+        let store = self.store(app)?;
+        let Some(profile) = store.profile(server_id)? else {
+            return Err(from_code("BACKUP_DISABLED"));
+        };
+        if !profile.enabled {
+            return Err(from_code("BACKUP_DISABLED"));
+        }
+        let Some(credential) = credentials.load_sync(server_id, &profile.profile_id)? else {
+            return Err(from_code("BACKUP_CREDENTIAL_INVALID"));
+        };
+        if !store.roots(server_id)?.iter().any(|r| r.id == root_id) {
+            return Err(from_code("BACKUP_ROOT_NOT_FOUND"));
+        }
+
+        // Server first, same as removing one: a refusal must stop the whole
+        // operation rather than leave this computer scanning a folder the
+        // server is not accepting writes for.
+        let client = BackupClient::new(origin.clone(), credential);
+        client.enable_root(root_id).await?;
+        store.set_root_enabled(server_id, root_id, true)?;
+
+        tracing::info!(server_id, root_id, "a folder is being protected again");
+
+        // Rescan and start uploading. Entries already sent are recognised and
+        // skipped, so resuming a folder costs a walk, not a re-upload.
+        self.spawn_activation(app, server_id, origin);
+        self.state(app, server_id)
+    }
+
+    /// Record that backup is off for this server, without telling it.
+    ///
+    /// Used when the server has already stopped backup - it disabled the
+    /// profile itself, or it rejected the grant - and for the local half of
+    /// `forget`. The engine stops, the credential goes, outstanding work is
+    /// dropped. What stays is everything needed to offer backup back: the
+    /// profile, the folders, and their paths on this PC.
+    ///
+    /// Nothing on this computer is deleted, and the device stays paired.
+    pub fn disable_locally(
+        &self,
+        app: &tauri::AppHandle,
+        credentials: &dyn CredentialStore,
+        server_id: &str,
+    ) -> Result<(), AppError> {
+        self.stop();
+        *self.activation.lock().unwrap() = None;
+        let store = self.store(app)?;
+        if let Some(profile) = store.profile(server_id)? {
+            credentials.delete_sync(server_id, &profile.profile_id)?;
+        }
+        store.disable_profile(server_id)?;
+        Ok(())
+    }
+
+    pub fn forget_locally(
         &self,
         app: &tauri::AppHandle,
         credentials: &dyn CredentialStore,
@@ -976,7 +1363,6 @@ impl BackupManager {
             credentials.delete_sync(server_id, &profile.profile_id)?;
         }
         store.forget_server(server_id)?;
-        tracing::info!(server_id, "computer backup turned off on this machine");
         Ok(())
     }
 }
@@ -1027,6 +1413,71 @@ fn custom_view(folder: &CustomFolder) -> ProtectableFolder {
 /// Windows paths are case-insensitive, and a trailing separator is not part of
 /// the name — `C:\Work` and `c:\work\` are one folder, and offering it twice
 /// would back it up twice.
+/// What a failed `GET /backup/me` means for this computer.
+///
+/// Three outcomes, and the distinctions are the whole reason this is a
+/// function rather than a catch-all:
+///
+/// * **Disabled** — the server answered, and the answer was no. Backup is off
+///   or this grant is gone. Acting on it is correct.
+/// * **Unknown** — nobody answered. A flat Wi-Fi, a server mid-restart, a
+///   timeout. Treating this as "no" would tear down a working setup every time
+///   the network hiccupped, so it must never collapse into `Disabled`.
+/// * **Active** — reserved here for a *trust* failure, which this function does
+///   not own. The caller re-raises it so the device watchdog handles it; a
+///   revoked device is not "backup is off", and reporting it as such would
+///   leave a computer that is no longer paired looking merely switched off.
+fn classify_reconcile_failure(code: &str) -> Reconciled {
+    if crate::connection::trust::is_trust_lost(code) {
+        // Not this function's call to make.
+        return Reconciled::Active;
+    }
+    match code {
+        "BACKUP_DISABLED" | "BACKUP_CREDENTIAL_INVALID" | "BACKUP_NOT_FOUND" => {
+            Reconciled::Disabled
+        }
+        _ => Reconciled::Unknown,
+    }
+}
+
+/// Does the server consider backup switched on for this computer?
+fn profile_is_on(status: &str) -> bool {
+    status == "ENABLED"
+}
+
+/// Which locally-protected roots the server no longer protects.
+///
+/// A root can be switched off from another device, or from the web UI, while
+/// this app is closed. Scanning it here afterwards would upload into a folder
+/// the server is refusing writes for — an error per file rather than one clear
+/// answer. A root the server does not mention at all counts as dropped: it is
+/// not in the profile it belongs to.
+fn roots_to_drop(local: &[Root], remote: &[bp::BackupRoot]) -> Vec<String> {
+    local
+        .iter()
+        .filter(|root| root.enabled)
+        .filter(|root| {
+            !remote
+                .iter()
+                .any(|other| other.id == root.id && other.status.as_deref() != Some("DISABLED"))
+        })
+        .map(|root| root.id.clone())
+        .collect()
+}
+
+/// Is the folder this root points at still on this PC?
+///
+/// Deliberately `is_dir` and not `exists`: a root whose path has been replaced
+/// by a *file* is no more openable than one that is gone, and offering to open
+/// it would fail in Explorer rather than here.
+///
+/// Nothing is inferred from the answer beyond what is displayed. A missing
+/// folder is not a reason to drop the root: the files are still on the server,
+/// and the drive may simply be unplugged.
+fn local_folder_exists(path: &std::path::Path) -> bool {
+    path.is_dir()
+}
+
 fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     fn normalise(path: &std::path::Path) -> String {
         let text = path.to_string_lossy().to_lowercase().replace('/', "\\");
@@ -1179,7 +1630,239 @@ mod custom_folder_tests {
             device_id: "device-1".into(),
             user_id: "user-1".into(),
             paused: false,
+            enabled: true,
         }
+    }
+
+    // --- Startup reconciliation -------------------------------------
+    //
+    // The local database is a cache of the queue, not the authority on whether
+    // this computer may back up. All of these can change while the app is
+    // closed, and the launch has to read them correctly before it starts
+    // scanning anything.
+
+    fn remote_root(id: &str, status: Option<&str>) -> bp::BackupRoot {
+        bp::BackupRoot {
+            id: id.into(),
+            kind: "CUSTOM".into(),
+            display_name: "TestBackup".into(),
+            source_path_identifier: "identifier".into(),
+            status: status.map(str::to_string),
+        }
+    }
+
+    fn local_root(id: &str, enabled: bool) -> Root {
+        Root {
+            id: id.into(),
+            kind: "CUSTOM".into(),
+            display_name: "TestBackup".into(),
+            local_path: std::path::PathBuf::from(r"D:\Profiles\TestUser\TestBackup"),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn a_computer_with_no_grant_has_nothing_to_ask_with() {
+        // The "server ACTIVE, local credential missing" case. Reconciliation
+        // asks the server using the grant this computer holds, so no grant
+        // means no question can be put — and, more importantly, no upload can
+        // be made either. Resuming on local state alone would scan folders and
+        // then fail every single transfer.
+        use crate::credentials::{CredentialStore, MemoryCredentialStore};
+
+        let credentials = MemoryCredentialStore::new();
+        let server_id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+        assert!(
+            credentials
+                .load_sync(server_id, "profile-1")
+                .unwrap()
+                .is_none(),
+            "a computer that has never been set up holds no grant"
+        );
+
+        credentials
+            .save_sync(
+                server_id,
+                "profile-1",
+                "arcsync_example_value_for_this_test",
+            )
+            .unwrap();
+        assert!(credentials
+            .load_sync(server_id, "profile-1")
+            .unwrap()
+            .is_some());
+
+        // Turning backup off drops it, which is what makes the stopped state
+        // unable to talk to the server at all.
+        credentials.delete_sync(server_id, "profile-1").unwrap();
+        assert!(
+            credentials
+                .load_sync(server_id, "profile-1")
+                .unwrap()
+                .is_none(),
+            "stopping backup must leave no usable grant behind"
+        );
+    }
+
+    #[test]
+    fn one_servers_grant_is_invisible_to_another() {
+        use crate::credentials::{CredentialStore, MemoryCredentialStore};
+
+        let credentials = MemoryCredentialStore::new();
+        credentials
+            .save_sync("server-a", "profile-1", "arcsync_a_value")
+            .unwrap();
+        assert!(
+            credentials
+                .load_sync("server-b", "profile-1")
+                .unwrap()
+                .is_none(),
+            "grants are namespaced per server; one must never answer for another"
+        );
+    }
+
+    #[test]
+    fn a_server_that_still_has_backup_on_keeps_it_on() {
+        assert!(profile_is_on("ENABLED"));
+    }
+
+    #[test]
+    fn a_server_that_has_turned_backup_off_is_believed() {
+        assert!(!profile_is_on("DISABLED"));
+        // Anything that is not an explicit yes is treated as off rather than
+        // guessed at, so a status this client has never heard of cannot be
+        // read as permission.
+        assert!(!profile_is_on(""));
+        assert!(!profile_is_on("SOMETHING_NEW"));
+    }
+
+    #[test]
+    fn being_told_backup_is_off_disables_it_locally() {
+        for code in [
+            "BACKUP_DISABLED",
+            "BACKUP_CREDENTIAL_INVALID",
+            "BACKUP_NOT_FOUND",
+        ] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Disabled,
+                "{code} is the server saying no"
+            );
+        }
+    }
+
+    #[test]
+    fn being_unable_to_ask_is_not_being_told_no() {
+        // The failure this prevents: losing Wi-Fi on launch and tearing down a
+        // perfectly good backup setup because the answer never arrived.
+        for code in [
+            "UNREACHABLE",
+            "TIMEOUT",
+            "TLS_ERROR",
+            "RATE_LIMITED",
+            "INTERNAL_ERROR",
+        ] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Unknown,
+                "{code} means nobody answered, not that the answer was no"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revoked_device_is_not_reconciled_away_quietly() {
+        // Losing the device is a different event with a different remedy —
+        // pair again — and it belongs to the trust watchdog. Reporting it as
+        // "backup is off" would offer a button that could not work.
+        for code in ["DEVICE_REVOKED", "DEVICE_INVALID", "BACKUP_DEVICE_UNPAIRED"] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Active,
+                "{code} must be re-raised, not swallowed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_the_server_still_protects_is_left_alone() {
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", Some("PROTECTED"))];
+        assert!(roots_to_drop(&local, &remote).is_empty());
+    }
+
+    #[test]
+    fn a_root_the_server_has_disabled_stops_being_scanned() {
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", Some("DISABLED"))];
+        assert_eq!(roots_to_drop(&local, &remote), vec!["root-1".to_string()]);
+    }
+
+    #[test]
+    fn a_root_the_server_no_longer_mentions_stops_being_scanned() {
+        let local = [local_root("root-1", true)];
+        assert_eq!(roots_to_drop(&local, &[]), vec!["root-1".to_string()]);
+    }
+
+    #[test]
+    fn a_root_without_a_status_is_taken_as_protected() {
+        // The field is optional in the protocol. Absent is not "disabled", and
+        // reading it that way would silently stop backing up a folder that is
+        // fine.
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", None)];
+        assert!(roots_to_drop(&local, &remote).is_empty());
+    }
+
+    #[test]
+    fn a_root_already_off_locally_is_not_dropped_again() {
+        let local = [local_root("root-1", false)];
+        assert!(roots_to_drop(&local, &[]).is_empty());
+    }
+
+    #[test]
+    fn only_the_roots_the_server_dropped_are_dropped() {
+        let local = [
+            local_root("keep", true),
+            local_root("drop", true),
+            local_root("already-off", false),
+        ];
+        let remote = [
+            remote_root("keep", Some("PROTECTED")),
+            remote_root("drop", Some("DISABLED")),
+        ];
+        assert_eq!(roots_to_drop(&local, &remote), vec!["drop".to_string()]);
+    }
+
+    #[test]
+    fn a_folder_that_is_there_reports_that_it_is_there() {
+        let (_guard, path) = folder("TestBackup");
+        assert!(local_folder_exists(&path));
+    }
+
+    #[test]
+    fn a_folder_deleted_since_it_was_protected_reports_missing() {
+        // The case this exists for: a root outlives the folder it points at.
+        // The server keeps the files and the record of where they came from,
+        // and the screen has to be able to say the folder is gone rather than
+        // offering to open it.
+        let (guard, path) = folder("TestBackup");
+        assert!(local_folder_exists(&path));
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!local_folder_exists(&path));
+        drop(guard);
+    }
+
+    #[test]
+    fn a_path_that_is_now_a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("TestBackup");
+        std::fs::write(&path, b"not a folder").unwrap();
+        assert!(
+            !local_folder_exists(&path),
+            "a file where a folder was is not openable either"
+        );
     }
 
     #[test]

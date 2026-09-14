@@ -183,10 +183,13 @@ Public distribution is **BLOCKED** until every box is ticked.
 
 - [ ] Continuous filesystem watcher complete and certified
 - [ ] Reconciliation after offline changes complete
-- [ ] Root disable/reactivate lifecycle integrated server-side
-- [ ] Profile stop/re-enable integrated (currently a client-side dead end —
-      stopping backup drops the sync credential while the server keeps the
-      profile, so re-enabling needs server-side grant rotation)
+- [x] Root disable/reactivate lifecycle integrated server-side
+- [x] Profile stop/re-enable integrated — the server disables the profile and
+      revokes the grant, the client keeps the profile and folder list so it can
+      offer them back, and re-enabling reuses the same profile with a freshly
+      rotated credential
+- [ ] Stop → re-enable certified against a live server (grant rotation proved,
+      no duplicate hierarchy)
 - [ ] Backup Center certified
 - [ ] Pairing and revocation certified
 - [ ] Graceful shutdown certified
@@ -204,3 +207,50 @@ Public distribution is **BLOCKED** until every box is ticked.
 
 Source is public before this gate; the installer is not. Those are separate
 decisions and should stay that way.
+
+## Certifying the backup lifecycle
+
+The one claim about backup that no local test can establish is that stopping it
+**revokes** the credential this computer holds, and that turning it back on
+issues a different one. Only a server that hashes, stores and revokes grants can
+show that, and only if it is the real one.
+
+`src-tauri/tests/lifecycle_live.rs` drives the real client functions over real
+HTTP against a real Arciin API. It skips unless `ARCIIN_CERT_ORIGIN` is set, so
+CI and ordinary `cargo test` runs are unaffected.
+
+**Point it only at a disposable instance.** It disables and re-enables the
+profile it is given. Against a live instance it would stop somebody's backup.
+
+Setting one up — a scratch database and a throwaway device, nothing shared with
+a running instance:
+
+1. A PostgreSQL cluster that is not the instance's own, and an empty database.
+2. A checkout of the server **copied** somewhere scratch, so the real one is
+   never written to, with `DATABASE_URL` pointed at that database and
+   `prisma db push` run against it.
+3. The API booted on a spare port, seeded with a user, a paired device, a
+   backup profile and one root, printing the origin, profile id, credential and
+   session cookie.
+
+Then:
+
+```bash
+ARCIIN_CERT_ORIGIN=http://127.0.0.1:4310 \
+ARCIIN_CERT_PROFILE_ID=... \
+ARCIIN_CERT_CREDENTIAL_A=... \
+ARCIIN_CERT_SESSION_COOKIE=... \
+  cargo test --test lifecycle_live -- --nocapture
+```
+
+It asserts the sequence end to end: A accepted → profile disabled → A rejected
+→ profile re-enabled → same profile and device, fresh credential B → A *still*
+rejected → B accepted → no root, profile or device duplicated.
+
+What it cannot assert from the client side, and what the server's own
+integration suite covers instead: that the stored grant is a hash rather than
+the credential. Run `pnpm test:integration` on the scratch copy for that.
+
+`src-tauri/tests/secret_safety.rs` covers the rest, and needs no server: the
+credential reaches exactly one `Authorization` header, never a URL, never a
+logging macro, never the local database, and never the state handed to the UI.

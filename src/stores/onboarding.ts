@@ -34,7 +34,6 @@ export type Step =
   /** This computer was disconnected server-side. */
   | "disconnected"
   /** Native backup status and settings. */
-  | "backupSettings"
 
 /** Sub-states of "connecting", so the UI can name what is happening. */
 export type ConnectPhase = "verifying" | "authorizing" | "securing" | "opening"
@@ -80,7 +79,6 @@ type Actions = {
   /** The native layer detected that this computer is no longer trusted. */
   deviceRevoked: (serverId: string) => Promise<void>
   /** Open the native backup status screen. */
-  showBackupSettings: () => void
   /** Leave the native backup UI and return to the running Arciin window. */
   closeBackupUi: () => void
   /** The Arciin page asked for the folder-protection screen. */
@@ -291,10 +289,16 @@ export const useOnboarding = create<State & Actions>((set, get) => ({
     ensureVisible()
     try {
       const state = await ipc.backupState()
-      // An existing profile — healthy or in error — belongs in the Backup
-      // Center; the error is something to see there, not a reason to set up
-      // again. Only a genuinely absent profile opens the wizard.
-      set({ step: state.enabled ? "backupCenter" : "protectFolders", error: null })
+      // An existing profile belongs in the Backup Center whatever state it is
+      // in — running, in error, or switched off. An error is something to see
+      // there, not a reason to set up again, and backup being *off* is the
+      // case this routing exists for: sending someone who stopped backup back
+      // through first-run setup is how a second tree gets built on the server.
+      // Only a genuinely absent profile opens the wizard.
+      set({
+        step: state.lifecycle === "NOT_SET_UP" ? "protectFolders" : "backupCenter",
+        error: null,
+      })
     } catch {
       set({ step: "protectFolders", error: null })
     }
@@ -310,11 +314,6 @@ export const useOnboarding = create<State & Actions>((set, get) => ({
   closeBackupUi() {
     set({ step: "connected" })
     void ipc.closeBackupUi()
-  },
-
-  showBackupSettings() {
-    ensureVisible()
-    set({ step: "backupSettings", error: null })
   },
 
   async deviceRevoked(serverId) {
