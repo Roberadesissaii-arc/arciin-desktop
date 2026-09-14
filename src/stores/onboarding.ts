@@ -34,7 +34,6 @@ export type Step =
   /** This computer was disconnected server-side. */
   | "disconnected"
   /** Native backup status and settings. */
-  | "backupSettings"
 
 /** Sub-states of "connecting", so the UI can name what is happening. */
 export type ConnectPhase = "verifying" | "authorizing" | "securing" | "opening"
@@ -80,7 +79,6 @@ type Actions = {
   /** The native layer detected that this computer is no longer trusted. */
   deviceRevoked: (serverId: string) => Promise<void>
   /** Open the native backup status screen. */
-  showBackupSettings: () => void
   /** Leave the native backup UI and return to the running Arciin window. */
   closeBackupUi: () => void
   /** The Arciin page asked for the folder-protection screen. */
@@ -316,11 +314,6 @@ export const useOnboarding = create<State & Actions>((set, get) => ({
   closeBackupUi() {
     set({ step: "connected" })
     void ipc.closeBackupUi()
-  },
-
-  showBackupSettings() {
-    ensureVisible()
-    set({ step: "backupSettings", error: null })
   },
 
   async deviceRevoked(serverId) {

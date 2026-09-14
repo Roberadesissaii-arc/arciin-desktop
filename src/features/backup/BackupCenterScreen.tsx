@@ -36,7 +36,7 @@ import { ScrollHint, useScrollHint } from "@/components/scroll"
 import { Button, LinkButton, Message } from "@/components/ui"
 import { HealthBadge } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
-import { formatBytes, formatCount } from "@/lib/format"
+import { describeDormantFolder, formatBytes, formatCount } from "@/lib/format"
 import type {
   AppError,
   BackupState,
@@ -247,17 +247,24 @@ export function BackupCenterScreen({
                       // What is actually on the server, per folder. A blanket
                       // "still stored on your server" would be a lie for a
                       // folder switched off before anything uploaded.
-                      <>Not protected &middot; {storedSummary(root)}</>
+                      <>Not protected &middot; {describeDormantFolder(root)}</>
                     )}
                   </span>
                 </span>
                 <span className="row" style={{ gap: 4 }}>
-                  <LinkButton
-                    onClick={() => void ipc.backupOpenRoot(root.id)}
-                    title="Open this folder in File Explorer"
-                  >
-                    <FolderOpen size={13} aria-hidden />
-                  </LinkButton>
+                  {/*
+                    Offered only when there is something to open. A root
+                    outlives the folder it points at, and an Open Folder that
+                    fails in Explorer is worse than no button at all.
+                  */}
+                  {root.localPathExists ? (
+                    <LinkButton
+                      onClick={() => void ipc.backupOpenRoot(root.id)}
+                      title="Open this folder in File Explorer"
+                    >
+                      <FolderOpen size={13} aria-hidden />
+                    </LinkButton>
+                  ) : null}
                   {root.enabled ? (
                     <LinkButton
                       onClick={() => setRemoving(root)}
@@ -269,8 +276,15 @@ export function BackupCenterScreen({
                   ) : (
                     <LinkButton
                       onClick={() => void run(() => ipc.backupResumeRoot(root.id))}
-                      title="Protect this folder again — the same folder, not a second copy"
-                      disabled={busy}
+                      title={
+                        root.localPathExists
+                          ? "Protect this folder again — the same folder, not a second copy"
+                          : "This folder is no longer on this PC"
+                      }
+                      // Nothing to resume from: the folder is gone. The record
+                      // and the stored files stay — this is history, not an
+                      // error to clear — but there is nothing to scan.
+                      disabled={busy || !root.localPathExists}
                     >
                       <RotateCcw size={13} aria-hidden />
                     </LinkButton>
@@ -435,18 +449,6 @@ export function BackupCenterScreen({
 }
 
 /**
- * What this folder actually has on the server, in one phrase.
- *
- * Nothing is a real answer and has to be said as one: a folder can be dropped
- * before a single file reaches the server, and reporting that as "stored"
- * would overstate what is protected in the one place people go to check.
- */
-function storedSummary(root: ProtectedRoot): string {
-  if (root.fileCount === 0) return "Nothing backed up yet"
-  return `${formatCount(root.fileCount)} files · ${formatBytes(root.bytesSynced)} on your server`
-}
-
-/**
  * What a computer whose backup has been turned off is shown.
  *
  * The state this replaces had no screen at all: stopping backup deleted the
@@ -515,7 +517,7 @@ function BackupOffScreen({
                     <span className="folder__path" title={root.localPath}>
                       {root.localPath}
                     </span>
-                    <span className="folder__meta">{storedSummary(root)}</span>
+                    <span className="folder__meta">{describeDormantFolder(root)}</span>
                   </span>
                 </div>
               </li>

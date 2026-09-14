@@ -94,3 +94,31 @@ export function formatCount(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "0"
   return Math.round(value).toLocaleString("en-US")
 }
+
+/**
+ * What a folder that is no longer being backed up actually has, in one phrase.
+ *
+ * Two independent facts, and all four combinations happen:
+ *
+ *   folder here, files stored     "4 files · 23 B on your server"
+ *   folder here, nothing stored   "Nothing backed up yet"
+ *   folder gone, files stored     "… on your server · Local folder not found"
+ *   folder gone, nothing stored   "Nothing backed up yet · Local folder not found"
+ *
+ * Neither may be assumed from the other. A folder can be dropped before a
+ * single file uploads, so "still stored on your Arciin server" as blanket copy
+ * would be false — and this list is exactly where somebody checks. A folder can
+ * equally be deleted from this PC long after its files were safely stored, and
+ * pretending it is still here would send them looking for it.
+ */
+export function describeDormantFolder(root: {
+  fileCount: number
+  bytesSynced: number
+  localPathExists: boolean
+}): string {
+  const stored =
+    root.fileCount > 0
+      ? `${formatCount(root.fileCount)} files · ${formatBytes(root.bytesSynced)} on your server`
+      : "Nothing backed up yet"
+  return root.localPathExists ? stored : `${stored} · Local folder not found`
+}

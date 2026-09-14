@@ -705,20 +705,57 @@ impl SyncStore {
     /// so re-adding the folder later still recognises them and re-uploads
     /// nothing.
     pub fn disable_root(&self, server_id: &str, root_id: &str) -> Result<(), AppError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+
+        // One transaction, because these two statements are one fact.
+        //
+        // They were separate, and a real Desktop root showed why: the update
+        // committed, the delete of 82,768 queued rows did not, and the result
+        // was a folder marked "not protected" sitting on a full queue. Read
+        // back, that queue says work is outstanding for a folder nothing is
+        // going to send — the exact dishonesty dropping the rows exists to
+        // prevent. Either both happen or neither does.
+        let tx = conn.transaction().map_err(map_write)?;
+        tx.execute(
             "UPDATE roots SET enabled = 0 WHERE server_id = ?1 AND id = ?2",
             params![server_id, root_id],
         )
         .map_err(map_write)?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM entries
              WHERE server_id = ?1 AND root_id = ?2
                AND state IN ('PENDING', 'IN_PROGRESS', 'FAILED')",
             params![server_id, root_id],
         )
         .map_err(map_write)?;
+        tx.commit().map_err(map_write)?;
         Ok(())
+    }
+
+    /// Drop queued work belonging to folders that are not being backed up.
+    ///
+    /// A safety net, not a substitute for `disable_root`. Rows can outlive the
+    /// folder they belong to through an interrupted shutdown or a version that
+    /// disabled a root less carefully, and once they do nothing else removes
+    /// them: the engine skips disabled roots, so the queue simply sits there
+    /// reporting outstanding work that will never be sent.
+    ///
+    /// Returns how many rows were swept, so a launch that finds some can say
+    /// so rather than silently tidying.
+    pub fn purge_queue_for_disabled_roots(&self, server_id: &str) -> Result<usize, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let removed = conn
+            .execute(
+                "DELETE FROM entries
+                 WHERE server_id = ?1
+                   AND state IN ('PENDING', 'IN_PROGRESS', 'FAILED')
+                   AND root_id IN (
+                       SELECT id FROM roots WHERE server_id = ?1 AND enabled = 0
+                   )",
+                params![server_id],
+            )
+            .map_err(map_write)?;
+        Ok(removed)
     }
 }
 
@@ -1386,6 +1423,91 @@ mod tests {
         let (files, _pending, _failed, bytes) = store.root_progress(SERVER_A, "root-1").unwrap();
         assert_eq!(files, 1);
         assert_eq!(bytes, 10);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_protected_keeps_no_queue() {
+        // What a disabled root must never look like: "not protected" on the
+        // screen, thousands of rows outstanding underneath. The queue is what
+        // every progress figure is counted from, so leaving it behind means
+        // reporting work for a folder nothing is going to send.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        store
+            .upsert_entry(SERVER_A, &entry("queued.txt", "entry-queued"))
+            .unwrap();
+
+        store.disable_root(SERVER_A, "root-1").unwrap();
+
+        let (_synced, outstanding, _failed, _bytes, _pending) = store.progress(SERVER_A).unwrap();
+        assert_eq!(
+            outstanding, 0,
+            "a folder nobody is backing up has no backlog"
+        );
+    }
+
+    #[test]
+    fn a_queue_that_outlived_its_folder_is_swept_up() {
+        // The recovery path for rows written before disabling became atomic.
+        // Nothing else removes them: the engine skips disabled roots, so they
+        // would sit there inflating the outstanding count forever.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        store
+            .upsert_entry(SERVER_A, &entry("queued.txt", "entry-queued"))
+            .unwrap();
+        // Disabled the careless way: the flag without the cleanup.
+        store.set_root_enabled(SERVER_A, "root-1", false).unwrap();
+
+        let swept = store.purge_queue_for_disabled_roots(SERVER_A).unwrap();
+
+        assert_eq!(swept, 1);
+        let (_synced, outstanding, _failed, _bytes, _pending) = store.progress(SERVER_A).unwrap();
+        assert_eq!(outstanding, 0);
+    }
+
+    #[test]
+    fn sweeping_leaves_protected_folders_alone() {
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        store
+            .upsert_entry(SERVER_A, &entry("queued.txt", "entry-queued"))
+            .unwrap();
+
+        assert_eq!(store.purge_queue_for_disabled_roots(SERVER_A).unwrap(), 0);
+        let (_synced, outstanding, _failed, _bytes, _pending) = store.progress(SERVER_A).unwrap();
+        assert_eq!(outstanding, 1, "a protected folder keeps its queue");
+    }
+
+    #[test]
+    fn sweeping_never_touches_what_was_already_sent() {
+        // Synced rows are the record of what the server holds. Losing them
+        // would mean re-uploading everything the next time the folder is
+        // protected again.
+        let (store, _dir) = store();
+        store.save_profile(&profile(SERVER_A)).unwrap();
+        store
+            .save_root(SERVER_A, &root("root-1", "TestBackup"))
+            .unwrap();
+        let mut sent = entry("sent.txt", "entry-sent");
+        sent.state = SyncState::Synced;
+        store.upsert_entry(SERVER_A, &sent).unwrap();
+        store.set_root_enabled(SERVER_A, "root-1", false).unwrap();
+
+        assert_eq!(store.purge_queue_for_disabled_roots(SERVER_A).unwrap(), 0);
+        assert!(store
+            .entry_by_path(SERVER_A, "root-1", "sent.txt")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

@@ -160,6 +160,15 @@ export type ProtectedRoot = {
    * the server's page, which has no IPC at all.
    */
   localPath: string
+  /**
+   * Whether that folder is still on this PC.
+   *
+   * A root outlives the folder it points at: somebody deletes the folder, or
+   * unplugs the drive. The server keeps the files and the record of where they
+   * came from, so the screen has to be able to say the folder is gone — and
+   * must not offer to open it.
+   */
+  localPathExists: boolean
   fileCount: number
   pending: number
   failed: number

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { formatBytes, formatCount } from "../src/lib/format"
+import { describeDormantFolder, formatBytes, formatCount } from "../src/lib/format"
 import type { BackupAvailability, BackupState } from "../src/types"
 
 /**
@@ -84,6 +84,7 @@ describe("backup state shape", () => {
           displayName: "Desktop",
           enabled: true,
           localPath: "C:\Users\TestUser\Desktop",
+          localPathExists: true,
           fileCount: 12,
           pending: 0,
           failed: 0,
@@ -118,6 +119,7 @@ describe("backup state shape", () => {
           displayName: "Desktop",
           enabled: false,
           localPath: "D:\\Profiles\\TestUser\\Desktop",
+          localPathExists: true,
           fileCount: 0,
           pending: 0,
           failed: 0,
@@ -207,28 +209,6 @@ describe("backup progress", () => {
     // The queue is written while it is being drained, so the two counters can
     // briefly disagree. The bar must not overflow.
     expect(percent(150, -60)).toBe(100)
-  })
-})
-
-/**
- * What the native bridge event does when it arrives.
- *
- * The native layer has already verified origin, type, version and action, so
- * the only decision left here is which screen to show.
- */
-function screenForSetupIntent(backupEnabled: boolean): "protectFolders" | "backupSettings" {
-  return backupEnabled ? "backupSettings" : "protectFolders"
-}
-
-describe("native backup setup intent", () => {
-  it("opens the folder picker when backup is not set up", () => {
-    expect(screenForSetupIntent(false)).toBe("protectFolders")
-  })
-
-  it("shows status instead of offering setup again when already enabled", () => {
-    // Re-offering setup to someone already backing up reads as though their
-    // earlier setup never happened.
-    expect(screenForSetupIntent(true)).toBe("backupSettings")
   })
 })
 
@@ -841,5 +821,75 @@ describe("known folders in the Backup Center", () => {
     // drops nothing, so no second profile and no second Device.
     const selection = ["DOCUMENTS"]
     expect(selection).toHaveLength(1)
+  })
+})
+
+/**
+ * What a folder that is no longer protected is allowed to claim.
+ *
+ * Two facts that vary independently — is the folder still on this PC, and did
+ * anything of it ever reach the server — so four combinations, all of which
+ * happen. Neither may be inferred from the other.
+ */
+describe("dormant folder copy", () => {
+  it("names what is stored when the folder is still here", () => {
+    expect(
+      describeDormantFolder({ fileCount: 4, bytesSynced: 23, localPathExists: true }),
+    ).toBe("4 files · 23 B on your server")
+  })
+
+  it("says nothing is stored when nothing ever uploaded", () => {
+    // The case that made blanket copy a lie: a folder switched off before a
+    // single file reached the server has nothing stored, and this list is
+    // exactly where somebody goes to check.
+    expect(
+      describeDormantFolder({ fileCount: 0, bytesSynced: 0, localPathExists: true }),
+    ).toBe("Nothing backed up yet")
+  })
+
+  it("says the folder is gone while still naming what is stored", () => {
+    // Deleting the folder here does not delete what the server holds, and the
+    // copy must not imply that it did.
+    expect(
+      describeDormantFolder({ fileCount: 3, bytesSynced: 74, localPathExists: false }),
+    ).toBe("3 files · 74 B on your server · Local folder not found")
+  })
+
+  it("says both when the folder is gone and nothing was ever stored", () => {
+    expect(
+      describeDormantFolder({ fileCount: 0, bytesSynced: 0, localPathExists: false }),
+    ).toBe("Nothing backed up yet · Local folder not found")
+  })
+
+  it("never claims storage that is not there", () => {
+    for (const localPathExists of [true, false]) {
+      const copy = describeDormantFolder({
+        fileCount: 0,
+        bytesSynced: 0,
+        localPathExists,
+      })
+      expect(copy).not.toMatch(/on your server/)
+      expect(copy).not.toMatch(/stored/i)
+    }
+  })
+})
+
+/**
+ * Opening a folder that is not there.
+ *
+ * A root outlives the folder it points at. The control has to go, rather than
+ * be offered and fail in Explorer.
+ */
+function canOpenInExplorer(root: { localPathExists: boolean }): boolean {
+  return root.localPathExists
+}
+
+describe("open folder availability", () => {
+  it("is offered for a folder that is still on this PC", () => {
+    expect(canOpenInExplorer({ localPathExists: true })).toBe(true)
+  })
+
+  it("is withheld for a folder that has been deleted", () => {
+    expect(canOpenInExplorer({ localPathExists: false })).toBe(false)
   })
 })

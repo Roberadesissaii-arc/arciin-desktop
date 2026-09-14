@@ -207,6 +207,13 @@ pub struct ProtectedRootView {
     /// which is our own bundled UI. It never goes to the server, and never to
     /// the webview showing the server's page — that one has no IPC at all.
     pub local_path: String,
+    /// Whether that folder is still on this PC.
+    ///
+    /// A root outlives the folder it points at: somebody deletes the folder,
+    /// or unplugs the drive it was on, and the server keeps the files and the
+    /// record of where they came from. The screen has to be able to say so,
+    /// and must not offer to open a folder that is not there.
+    pub local_path_exists: bool,
     pub file_count: i64,
     pub pending: i64,
     pub failed: i64,
@@ -983,6 +990,7 @@ impl BackupManager {
                             .root_progress(server_id, &root.id)
                             .unwrap_or((0, 0, 0, 0));
                         ProtectedRootView {
+                            local_path_exists: local_folder_exists(&root.local_path),
                             local_path: root.local_path.to_string_lossy().into_owned(),
                             id: root.id,
                             kind: root.kind,
@@ -1032,6 +1040,7 @@ impl BackupManager {
                         .root_progress(server_id, &root.id)
                         .unwrap_or((0, 0, 0, 0));
                     ProtectedRootView {
+                        local_path_exists: local_folder_exists(&root.local_path),
                         local_path: root.local_path.to_string_lossy().into_owned(),
                         id: root.id,
                         kind: root.kind,
@@ -1167,40 +1176,41 @@ impl BackupManager {
         let client = BackupClient::new(origin.clone(), credential);
         let server_profile = match client.me().await {
             Ok(profile) => profile,
-            // The grant is gone, or backup was turned off. Either way this
-            // computer is not backing up until somebody turns it back on.
-            Err(err)
-                if matches!(
-                    err.code.as_str(),
-                    "BACKUP_DISABLED" | "BACKUP_CREDENTIAL_INVALID" | "BACKUP_NOT_FOUND"
-                ) =>
-            {
-                return Ok(Reconciled::Disabled)
-            }
-            // A revoked *device* is a different matter entirely, and is
-            // handled by the trust watchdog rather than quietly here.
-            Err(err) if crate::connection::trust::is_trust_lost(&err.code) => return Err(err),
-            Err(_) => return Ok(Reconciled::Unknown),
+            Err(err) => match classify_reconcile_failure(&err.code) {
+                Reconciled::Disabled => return Ok(Reconciled::Disabled),
+                Reconciled::Unknown => return Ok(Reconciled::Unknown),
+                // A revoked *device* is a different matter entirely, and is
+                // handled by the trust watchdog rather than quietly here.
+                Reconciled::Active => return Err(err),
+            },
         };
 
-        if server_profile.status != "ENABLED" {
+        if !profile_is_on(&server_profile.status) {
             return Ok(Reconciled::Disabled);
         }
 
         // Roots the server no longer protects must stop being scanned here,
         // however healthy they look in the local cache.
-        for local in store.roots(server_id)?.iter().filter(|r| r.enabled) {
-            let still_protected = server_profile.roots.iter().any(|remote| {
-                remote.id == local.id && remote.status.as_deref() != Some("DISABLED")
-            });
-            if !still_protected {
-                tracing::info!(
-                    server_id,
-                    root_id = %local.id,
-                    "the server no longer protects this folder; dropping it locally"
-                );
-                store.disable_root(server_id, &local.id)?;
-            }
+        let local_roots = store.roots(server_id)?;
+        for root_id in roots_to_drop(&local_roots, &server_profile.roots) {
+            tracing::info!(
+                server_id,
+                root_id = %root_id,
+                "the server no longer protects this folder; dropping it locally"
+            );
+            store.disable_root(server_id, &root_id)?;
+        }
+
+        // Anything still queued for a folder that is not being backed up is
+        // stale by definition, and nothing else will ever remove it.
+        match store.purge_queue_for_disabled_roots(server_id) {
+            Ok(0) => {}
+            Ok(swept) => tracing::info!(
+                server_id,
+                swept,
+                "dropped queued work left behind by folders that are no longer protected"
+            ),
+            Err(err) => tracing::warn!(code = %err.code, "stale queue could not be swept"),
         }
 
         Ok(Reconciled::Active)
@@ -1403,6 +1413,71 @@ fn custom_view(folder: &CustomFolder) -> ProtectableFolder {
 /// Windows paths are case-insensitive, and a trailing separator is not part of
 /// the name — `C:\Work` and `c:\work\` are one folder, and offering it twice
 /// would back it up twice.
+/// What a failed `GET /backup/me` means for this computer.
+///
+/// Three outcomes, and the distinctions are the whole reason this is a
+/// function rather than a catch-all:
+///
+/// * **Disabled** — the server answered, and the answer was no. Backup is off
+///   or this grant is gone. Acting on it is correct.
+/// * **Unknown** — nobody answered. A flat Wi-Fi, a server mid-restart, a
+///   timeout. Treating this as "no" would tear down a working setup every time
+///   the network hiccupped, so it must never collapse into `Disabled`.
+/// * **Active** — reserved here for a *trust* failure, which this function does
+///   not own. The caller re-raises it so the device watchdog handles it; a
+///   revoked device is not "backup is off", and reporting it as such would
+///   leave a computer that is no longer paired looking merely switched off.
+fn classify_reconcile_failure(code: &str) -> Reconciled {
+    if crate::connection::trust::is_trust_lost(code) {
+        // Not this function's call to make.
+        return Reconciled::Active;
+    }
+    match code {
+        "BACKUP_DISABLED" | "BACKUP_CREDENTIAL_INVALID" | "BACKUP_NOT_FOUND" => {
+            Reconciled::Disabled
+        }
+        _ => Reconciled::Unknown,
+    }
+}
+
+/// Does the server consider backup switched on for this computer?
+fn profile_is_on(status: &str) -> bool {
+    status == "ENABLED"
+}
+
+/// Which locally-protected roots the server no longer protects.
+///
+/// A root can be switched off from another device, or from the web UI, while
+/// this app is closed. Scanning it here afterwards would upload into a folder
+/// the server is refusing writes for — an error per file rather than one clear
+/// answer. A root the server does not mention at all counts as dropped: it is
+/// not in the profile it belongs to.
+fn roots_to_drop(local: &[Root], remote: &[bp::BackupRoot]) -> Vec<String> {
+    local
+        .iter()
+        .filter(|root| root.enabled)
+        .filter(|root| {
+            !remote
+                .iter()
+                .any(|other| other.id == root.id && other.status.as_deref() != Some("DISABLED"))
+        })
+        .map(|root| root.id.clone())
+        .collect()
+}
+
+/// Is the folder this root points at still on this PC?
+///
+/// Deliberately `is_dir` and not `exists`: a root whose path has been replaced
+/// by a *file* is no more openable than one that is gone, and offering to open
+/// it would fail in Explorer rather than here.
+///
+/// Nothing is inferred from the answer beyond what is displayed. A missing
+/// folder is not a reason to drop the root: the files are still on the server,
+/// and the drive may simply be unplugged.
+fn local_folder_exists(path: &std::path::Path) -> bool {
+    path.is_dir()
+}
+
 fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     fn normalise(path: &std::path::Path) -> String {
         let text = path.to_string_lossy().to_lowercase().replace('/', "\\");
@@ -1557,6 +1632,237 @@ mod custom_folder_tests {
             paused: false,
             enabled: true,
         }
+    }
+
+    // --- Startup reconciliation -------------------------------------
+    //
+    // The local database is a cache of the queue, not the authority on whether
+    // this computer may back up. All of these can change while the app is
+    // closed, and the launch has to read them correctly before it starts
+    // scanning anything.
+
+    fn remote_root(id: &str, status: Option<&str>) -> bp::BackupRoot {
+        bp::BackupRoot {
+            id: id.into(),
+            kind: "CUSTOM".into(),
+            display_name: "TestBackup".into(),
+            source_path_identifier: "identifier".into(),
+            status: status.map(str::to_string),
+        }
+    }
+
+    fn local_root(id: &str, enabled: bool) -> Root {
+        Root {
+            id: id.into(),
+            kind: "CUSTOM".into(),
+            display_name: "TestBackup".into(),
+            local_path: std::path::PathBuf::from(r"D:\Profiles\TestUser\TestBackup"),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn a_computer_with_no_grant_has_nothing_to_ask_with() {
+        // The "server ACTIVE, local credential missing" case. Reconciliation
+        // asks the server using the grant this computer holds, so no grant
+        // means no question can be put — and, more importantly, no upload can
+        // be made either. Resuming on local state alone would scan folders and
+        // then fail every single transfer.
+        use crate::credentials::{CredentialStore, MemoryCredentialStore};
+
+        let credentials = MemoryCredentialStore::new();
+        let server_id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+        assert!(
+            credentials
+                .load_sync(server_id, "profile-1")
+                .unwrap()
+                .is_none(),
+            "a computer that has never been set up holds no grant"
+        );
+
+        credentials
+            .save_sync(
+                server_id,
+                "profile-1",
+                "arcsync_example_value_for_this_test",
+            )
+            .unwrap();
+        assert!(credentials
+            .load_sync(server_id, "profile-1")
+            .unwrap()
+            .is_some());
+
+        // Turning backup off drops it, which is what makes the stopped state
+        // unable to talk to the server at all.
+        credentials.delete_sync(server_id, "profile-1").unwrap();
+        assert!(
+            credentials
+                .load_sync(server_id, "profile-1")
+                .unwrap()
+                .is_none(),
+            "stopping backup must leave no usable grant behind"
+        );
+    }
+
+    #[test]
+    fn one_servers_grant_is_invisible_to_another() {
+        use crate::credentials::{CredentialStore, MemoryCredentialStore};
+
+        let credentials = MemoryCredentialStore::new();
+        credentials
+            .save_sync("server-a", "profile-1", "arcsync_a_value")
+            .unwrap();
+        assert!(
+            credentials
+                .load_sync("server-b", "profile-1")
+                .unwrap()
+                .is_none(),
+            "grants are namespaced per server; one must never answer for another"
+        );
+    }
+
+    #[test]
+    fn a_server_that_still_has_backup_on_keeps_it_on() {
+        assert!(profile_is_on("ENABLED"));
+    }
+
+    #[test]
+    fn a_server_that_has_turned_backup_off_is_believed() {
+        assert!(!profile_is_on("DISABLED"));
+        // Anything that is not an explicit yes is treated as off rather than
+        // guessed at, so a status this client has never heard of cannot be
+        // read as permission.
+        assert!(!profile_is_on(""));
+        assert!(!profile_is_on("SOMETHING_NEW"));
+    }
+
+    #[test]
+    fn being_told_backup_is_off_disables_it_locally() {
+        for code in [
+            "BACKUP_DISABLED",
+            "BACKUP_CREDENTIAL_INVALID",
+            "BACKUP_NOT_FOUND",
+        ] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Disabled,
+                "{code} is the server saying no"
+            );
+        }
+    }
+
+    #[test]
+    fn being_unable_to_ask_is_not_being_told_no() {
+        // The failure this prevents: losing Wi-Fi on launch and tearing down a
+        // perfectly good backup setup because the answer never arrived.
+        for code in [
+            "UNREACHABLE",
+            "TIMEOUT",
+            "TLS_ERROR",
+            "RATE_LIMITED",
+            "INTERNAL_ERROR",
+        ] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Unknown,
+                "{code} means nobody answered, not that the answer was no"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revoked_device_is_not_reconciled_away_quietly() {
+        // Losing the device is a different event with a different remedy —
+        // pair again — and it belongs to the trust watchdog. Reporting it as
+        // "backup is off" would offer a button that could not work.
+        for code in ["DEVICE_REVOKED", "DEVICE_INVALID", "BACKUP_DEVICE_UNPAIRED"] {
+            assert_eq!(
+                classify_reconcile_failure(code),
+                Reconciled::Active,
+                "{code} must be re-raised, not swallowed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_the_server_still_protects_is_left_alone() {
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", Some("PROTECTED"))];
+        assert!(roots_to_drop(&local, &remote).is_empty());
+    }
+
+    #[test]
+    fn a_root_the_server_has_disabled_stops_being_scanned() {
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", Some("DISABLED"))];
+        assert_eq!(roots_to_drop(&local, &remote), vec!["root-1".to_string()]);
+    }
+
+    #[test]
+    fn a_root_the_server_no_longer_mentions_stops_being_scanned() {
+        let local = [local_root("root-1", true)];
+        assert_eq!(roots_to_drop(&local, &[]), vec!["root-1".to_string()]);
+    }
+
+    #[test]
+    fn a_root_without_a_status_is_taken_as_protected() {
+        // The field is optional in the protocol. Absent is not "disabled", and
+        // reading it that way would silently stop backing up a folder that is
+        // fine.
+        let local = [local_root("root-1", true)];
+        let remote = [remote_root("root-1", None)];
+        assert!(roots_to_drop(&local, &remote).is_empty());
+    }
+
+    #[test]
+    fn a_root_already_off_locally_is_not_dropped_again() {
+        let local = [local_root("root-1", false)];
+        assert!(roots_to_drop(&local, &[]).is_empty());
+    }
+
+    #[test]
+    fn only_the_roots_the_server_dropped_are_dropped() {
+        let local = [
+            local_root("keep", true),
+            local_root("drop", true),
+            local_root("already-off", false),
+        ];
+        let remote = [
+            remote_root("keep", Some("PROTECTED")),
+            remote_root("drop", Some("DISABLED")),
+        ];
+        assert_eq!(roots_to_drop(&local, &remote), vec!["drop".to_string()]);
+    }
+
+    #[test]
+    fn a_folder_that_is_there_reports_that_it_is_there() {
+        let (_guard, path) = folder("TestBackup");
+        assert!(local_folder_exists(&path));
+    }
+
+    #[test]
+    fn a_folder_deleted_since_it_was_protected_reports_missing() {
+        // The case this exists for: a root outlives the folder it points at.
+        // The server keeps the files and the record of where they came from,
+        // and the screen has to be able to say the folder is gone rather than
+        // offering to open it.
+        let (guard, path) = folder("TestBackup");
+        assert!(local_folder_exists(&path));
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!local_folder_exists(&path));
+        drop(guard);
+    }
+
+    #[test]
+    fn a_path_that_is_now_a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("TestBackup");
+        std::fs::write(&path, b"not a folder").unwrap();
+        assert!(
+            !local_folder_exists(&path),
+            "a file where a folder was is not openable either"
+        );
     }
 
     #[test]

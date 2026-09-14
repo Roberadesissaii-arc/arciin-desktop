@@ -21,7 +21,6 @@ import { DisconnectedScreen } from "@/features/connection/DisconnectedScreen"
 import { ManualScreen } from "@/features/discovery/ManualScreen"
 import { SearchScreen } from "@/features/discovery/SearchScreen"
 import { PairingScreen } from "@/features/pairing/PairingScreen"
-import { BackupSettingsScreen } from "@/features/backup/BackupSettingsScreen"
 import { BackupCenterScreen } from "@/features/backup/BackupCenterScreen"
 import { ProtectFoldersScreen } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
@@ -127,8 +126,6 @@ function Step({ step }: { step: ReturnType<typeof useOnboarding.getState>["step"
       return <PairingScreen />
     case "connecting":
       return <ConnectingScreen />
-    case "backupSettings":
-      return <BackupSettings />
     case "disconnected":
       return <DisconnectedScreen />
     case "protectFolders":
@@ -160,15 +157,11 @@ function BackupCenter() {
     <BackupCenterScreen
       deviceName={deviceName}
       onClose={close}
-      // Backup stopped: there is nothing left to manage, so the next visit
-      // should offer setup again rather than an empty Backup Center.
+      // Backup stopped. The next visit comes back here, not to setup: the
+      // profile still exists on the server in a disabled state, and the
+      // Backup Center is what offers it back.
       onStopped={close}
     />
   )
 }
 
-/** The native backup status screen, with its way back. */
-function BackupSettings() {
-  const skipBackup = useOnboarding((state) => state.skipBackup)
-  return <BackupSettingsScreen onBack={skipBackup} />
-}

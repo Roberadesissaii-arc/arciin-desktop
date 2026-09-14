@@ -71,6 +71,9 @@ windows = { version = "0.61.3", features = [
 
 [dev-dependencies]
 tempfile = "3"
+# The live lifecycle certification test drives async client calls directly.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+url = "2"
 
 [features]
 default = ["custom-protocol"]
