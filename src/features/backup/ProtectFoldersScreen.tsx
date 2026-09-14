@@ -21,8 +21,9 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { FolderClosed, FolderPlus, HardDriveDownload, Loader2, ShieldCheck } from "lucide-react"
+import { FolderClosed, FolderPlus, HardDriveDownload, Loader2 } from "lucide-react"
 
+import { FooterNote } from "@/components/footer-note"
 import { ScrollHint, useScrollHint } from "@/components/scroll"
 import { useVisibleRowCap } from "@/components/row-cap"
 import { Button, LinkButton, Message } from "@/components/ui"
@@ -288,10 +289,7 @@ export function ProtectFoldersScreen({
             <LinkButton onClick={onSkip}>Not now</LinkButton>
           </div>
         </div>
-        <p className="privacy-note">
-          <ShieldCheck size={14} aria-hidden />
-          Nothing on this PC was changed or deleted.
-        </p>
+        <FooterNote>Nothing on this PC was changed or deleted.</FooterNote>
       </div>
     )
   }
@@ -330,10 +328,7 @@ export function ProtectFoldersScreen({
         <div className="centered">
           <LinkButton onClick={onDone}>Done</LinkButton>
         </div>
-        <p className="privacy-note">
-          <ShieldCheck size={14} aria-hidden />
-          Copied to your own server. Nothing is ever deleted from this PC.
-        </p>
+        <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
       </div>
     )
   }
@@ -460,10 +455,7 @@ export function ProtectFoldersScreen({
         </div>
       </div>
 
-      <p className="privacy-note">
-        <ShieldCheck size={14} aria-hidden />
-        Copied to your own server. Nothing is ever deleted from this PC.
-      </p>
+      <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
     </div>
   )
 }

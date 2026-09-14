@@ -6,8 +6,9 @@
  * obvious next step, never as a failure.
  */
 
-import { RefreshCw, ShieldCheck } from "lucide-react"
+import { RefreshCw } from "lucide-react"
 
+import { FooterNote } from "@/components/footer-note"
 import { ArciinMark } from "@/components/brand"
 import { Button, LinkButton, Message, Status } from "@/components/ui"
 import { FoundServerCard, SavedServerCard } from "@/features/discovery/ServerCard"
@@ -115,10 +116,7 @@ export function SearchScreen() {
         </div>
       ) : null}
 
-      <p className="privacy-note">
-        <ShieldCheck size={14} aria-hidden />
-        Private by design &mdash; your account and files stay on your server.
-      </p>
+      <FooterNote>Private by design &mdash; your account and files stay on your server.</FooterNote>
     </div>
   )
 }

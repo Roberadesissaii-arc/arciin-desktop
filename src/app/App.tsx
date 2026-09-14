@@ -10,10 +10,11 @@
  * Settings in this application.
  */
 
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { KeyRound, Network, ShieldCheck } from "lucide-react"
 
 import { HeroWordmark, Wordmark } from "@/components/brand"
+import { FooterNoteSlot } from "@/components/footer-note"
 import { HeroConnection } from "@/components/hero-connection"
 import { Status } from "@/components/ui"
 import { ConnectingScreen } from "@/features/connection/ConnectingScreen"
@@ -63,7 +64,12 @@ export function App() {
     return () => dispose?.()
   }, [])
 
+  // The footer's middle slot. State rather than a plain ref, because screens
+  // portal into it and must re-render once it exists.
+  const [noteSlot, setNoteSlot] = useState<HTMLElement | null>(null)
+
   return (
+    <FooterNoteSlot.Provider value={noteSlot}>
     <div className="shell">
       <main className="shell__main">
         <Wordmark />
@@ -72,9 +78,16 @@ export function App() {
             <Step step={step} />
           </div>
         </div>
+        {/*
+          One row, three places. The middle one is filled by whichever screen
+          is showing; see components/footer-note.
+        */}
         <footer className="shell__footer">
-          <span>Copyright &copy; 2026 Arciin.</span>
-          <span>Arciin Desktop {__APP_VERSION__}</span>
+          <span className="shell__footer__end">Copyright &copy; 2026 Arciin.</span>
+          <span className="shell__footer__note" ref={setNoteSlot} />
+          <span className="shell__footer__end shell__footer__end--right">
+            Arciin Desktop {__APP_VERSION__}
+          </span>
         </footer>
       </main>
 
@@ -113,6 +126,7 @@ export function App() {
         </div>
       </aside>
     </div>
+    </FooterNoteSlot.Provider>
   )
 }
 

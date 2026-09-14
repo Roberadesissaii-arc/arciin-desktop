@@ -507,7 +507,16 @@
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.folder:hover:not(:disabled) {
+/*
+ * Only rows that are themselves buttons light up.
+ *
+ * The folder picker's rows toggle, so the whole row is the control and should
+ * respond. The management lists' rows do not: they report, and their controls
+ * sit at the right-hand end. Lighting those up on hover promises a click that
+ * does nothing — which is how "Add" ended up being the entire card, where
+ * reaching for the folder name started an upload.
+ */
+button.folder:hover:not(:disabled) {
   border-color: #e0e0e0;
   background: #fcfcfc;
 }

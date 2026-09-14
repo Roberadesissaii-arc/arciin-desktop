@@ -31,6 +31,7 @@ import {
   X,
 } from "lucide-react"
 
+import { FooterNote } from "@/components/footer-note"
 import { useVisibleRowCap } from "@/components/row-cap"
 import { ScrollHint, useScrollHint } from "@/components/scroll"
 import { Button, LinkButton, Message } from "@/components/ui"
@@ -327,12 +328,17 @@ export function BackupCenterScreen({
             >
               {available.map((folder) => (
                 <li key={folder.id}>
-                  <button
-                    type="button"
-                    className="folder"
-                    disabled={busy}
-                    onClick={() => void run(() => ipc.backupEnable([folder.id]))}
-                  >
+                  {/*
+                    The row is not the control; the button is.
+
+                    It used to be one big <button>, so anywhere on the card
+                    started backing up a folder — including the folder name and
+                    the path, which are the parts you reach for when you are
+                    reading rather than choosing. Protecting a folder can mean
+                    uploading a very great deal, so it should take pressing the
+                    thing that says Add.
+                  */}
+                  <div className="folder">
                     <span className="folder__icon" aria-hidden>
                       <FolderClosed size={16} />
                     </span>
@@ -340,10 +346,16 @@ export function BackupCenterScreen({
                       <span className="folder__name">{folder.displayName}</span>
                       <span className="folder__meta">Not backed up</span>
                     </span>
-                    <span className="btn-link btn-link--accent" aria-hidden>
+                    <Button
+                      compact
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => void run(() => ipc.backupEnable([folder.id]))}
+                      aria-label={`Back up ${folder.displayName}`}
+                    >
                       Add
-                    </span>
-                  </button>
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -440,10 +452,7 @@ export function BackupCenterScreen({
         )}
       </div>
 
-      <p className="privacy-note">
-        <ShieldCheck size={14} aria-hidden />
-        Copied to your own server. Nothing is ever deleted from this PC.
-      </p>
+      <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
     </div>
   )
 }
@@ -547,10 +556,7 @@ function BackupOffScreen({
         You&rsquo;ll choose which folders to resume.
       </p>
 
-      <p className="privacy-note">
-        <ShieldCheck size={14} aria-hidden />
-        Copied to your own server. Nothing is ever deleted from this PC.
-      </p>
+      <FooterNote>Copied to your own server. Nothing is ever deleted from this PC.</FooterNote>
     </div>
   )
 }
