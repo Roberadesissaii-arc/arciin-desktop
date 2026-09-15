@@ -110,7 +110,7 @@ balance, so the card is text-led instead: name, status, address.
 
 ### Masked addresses
 
-Server cards show `192.168.1.xxx:3002`, not the full address. The subnet and
+Server cards show `203.0.113.xxx:3002`, not the full address. The subnet and
 port are what identify the network and the service; the final octet identifies
 one machine and is not needed to tell saved servers apart, because the instance
 name already does that. Hostnames are never masked — there is no per-machine

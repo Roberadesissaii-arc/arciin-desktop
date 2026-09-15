@@ -15,11 +15,20 @@
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$installer = Join-Path $repo "src-tauri\target\release\bundle\nsis\Arciin Desktop_0.1.0_x64-setup.exe"
+# Found rather than named. The published asset is renamed to drop the space
+# from Tauri's default (`Arciin Desktop_0.1.0_x64-setup.exe`), and naming
+# either spelling here means this script breaks the moment the other one is
+# what got built.
+$bundle = Join-Path $repo "src-tauri\target\release\bundle\nsis"
+$installer = if (Test-Path $bundle) {
+    (Get-ChildItem $bundle -Filter "*.exe" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1).FullName
+} else { $null }
 $installed = Join-Path $env:LOCALAPPDATA "Arciin Desktop\arciin-desktop.exe"
 
-if (-not (Test-Path $installer)) {
-    throw "No installer at $installer. Run: npx tauri build"
+if (-not $installer -or -not (Test-Path $installer)) {
+    throw "No installer in $bundle. Run: npm run tauri:build"
 }
 
 # Stop every instance, wherever it was launched from: one started out of

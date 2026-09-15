@@ -478,6 +478,14 @@ pub fn classify(error: &AppError) -> Retry {
         | "BACKUP_IDEMPOTENCY_CONFLICT"
         | "BACKUP_READ_ONLY"
         | "VALIDATION_ERROR"
+        // A file bigger than the server accepts will be exactly as big next
+        // time. Left to the default it would be treated as a network problem
+        // and retried forever, holding up everything queued behind it.
+        | "UPLOAD_TOO_LARGE"
+        // The server does not know this entry, so a move or a removal aimed at
+        // it cannot land. Reconciliation notices it is missing and sends it
+        // again; retrying the same doomed request would not.
+        | "BACKUP_ENTRY_NOT_FOUND"
         | "BACKUP_FILE_UNREADABLE" => Retry::SkipEntry,
 
         // Network, server restart, rate limit: exactly what backoff is for.

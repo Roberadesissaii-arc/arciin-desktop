@@ -305,7 +305,27 @@ fn reconcile_root_inner(
                     && entry.modified_ms == modified
                     && (entry.state == SyncState::Synced
                         || (entry.state == SyncState::Pending
-                            && entry.intent == Intent::Upsert)) => {}
+                            && entry.intent == Intent::Upsert)) =>
+            {
+                // Nothing to send — but this may be an entry from before the
+                // client learned to ask Windows for file identities, and a
+                // file that has not changed since is exactly the one that
+                // never acquires one otherwise.
+                //
+                // Without it an upgraded backup silently loses move detection
+                // for every file that happens not to be edited again: moving
+                // one would re-upload it. Learned once, here, with the state
+                // left exactly as it was so nothing is queued by the learning.
+                if entry.file_id.is_none() {
+                    if let Some(file_id) = crate::backup::identity::identify(
+                        &root.local_path.join(relative_path.replace('/', "\\")),
+                    ) {
+                        let mut learned = (*entry).clone();
+                        learned.file_id = Some(file_id);
+                        batch.push(learned);
+                    }
+                }
+            }
             Some(entry) => {
                 updated += 1;
                 batch.push(Entry {

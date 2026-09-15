@@ -646,3 +646,83 @@ fn nothing_in_the_lifecycle_copy_leaks_a_secret_shaped_word() {
         }
     }
 }
+
+// --- Every answer the server can give -------------------------------------
+//
+// Found during final certification: two of the server's documented backup
+// error codes fell through to the generic "something went wrong connecting",
+// which is both untrue and — because the fallback is retryable — meant the
+// engine would retry a doomed request forever, holding up everything queued
+// behind it.
+
+/// The complete backup vocabulary from the server's `errors.ts`.
+const SERVER_BACKUP_CODES: [&str; 17] = [
+    "BACKUP_NOT_SUPPORTED",
+    "BACKUP_UNAUTHORIZED",
+    "BACKUP_CREDENTIAL_INVALID",
+    "BACKUP_DEVICE_UNPAIRED",
+    "BACKUP_FORBIDDEN",
+    "BACKUP_DISABLED",
+    "SYNC_ROOT_DISABLED",
+    "BACKUP_NOT_FOUND",
+    "BACKUP_ROOT_NOT_FOUND",
+    "BACKUP_ENTRY_NOT_FOUND",
+    "BACKUP_READ_ONLY",
+    "BACKUP_IDEMPOTENCY_CONFLICT",
+    "PATH_TRAVERSAL",
+    "PATH_INVALID",
+    "PATH_TOO_LONG",
+    "VALIDATION_ERROR",
+    "UPLOAD_TOO_LARGE",
+];
+
+#[test]
+fn every_server_backup_code_says_something_specific() {
+    let generic = from_code("A_CODE_NOBODY_HAS_HEARD_OF").message;
+    let mut vague = Vec::new();
+    for code in SERVER_BACKUP_CODES {
+        if from_code(code).message == generic {
+            vague.push(code);
+        }
+    }
+    assert!(
+        vague.is_empty(),
+        "these fall through to the generic apology: {vague:?}"
+    );
+}
+
+#[test]
+fn a_file_the_server_will_never_accept_is_not_retried_forever() {
+    // The one that matters most for a queue: a permanent rejection treated as
+    // a transient one blocks everything behind it, indefinitely.
+    use arciin_desktop_lib::backup::client::{classify, Retry};
+    assert_eq!(classify(&from_code("UPLOAD_TOO_LARGE")), Retry::SkipEntry);
+    assert_eq!(
+        classify(&from_code("BACKUP_ENTRY_NOT_FOUND")),
+        Retry::SkipEntry
+    );
+}
+
+#[test]
+fn a_permanent_rejection_never_invites_a_retry() {
+    for code in ["UPLOAD_TOO_LARGE", "BACKUP_ENTRY_NOT_FOUND"] {
+        assert!(
+            !from_code(code).retryable,
+            "{code} must not be offered as retryable"
+        );
+    }
+}
+
+#[test]
+fn a_transient_failure_still_backs_off_rather_than_skipping() {
+    // The other side: a network blip must not make the client give up on a
+    // file and report it failed.
+    use arciin_desktop_lib::backup::client::{classify, Retry};
+    for code in ["UNREACHABLE", "TIMEOUT", "RATE_LIMITED", "INTERNAL_ERROR"] {
+        assert_eq!(
+            classify(&from_code(code)),
+            Retry::Backoff,
+            "{code} is worth waiting out"
+        );
+    }
+}
