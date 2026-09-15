@@ -642,6 +642,17 @@ impl BackupManager {
                 Ok(store) => store,
                 Err(err) => return manager.fail(&handle, &err),
             };
+
+            // Before the walk, not after. Enumerating a large folder takes
+            // minutes, and for all of them the server would otherwise have no
+            // statement from this computer that the folder is its to back up.
+            if let Some(profile) = store.profile(&server).ok().flatten() {
+                if let Ok(Some(credential)) = credentials.load_sync(&server, &profile.profile_id) {
+                    let client = BackupClient::new(origin.clone(), credential);
+                    acknowledge_owned_roots(&store, &client, &server).await;
+                }
+            }
+
             if let Err(err) = manager.seed_queue(&store, &server).await {
                 return manager.fail(&handle, &err);
             }
@@ -1378,6 +1389,12 @@ impl BackupManager {
             Err(err) => tracing::warn!(code = %err.code, "stale queue could not be swept"),
         }
 
+        // Deliberately after the drop pass. Acknowledging is a claim, and the
+        // folders dropped just above are precisely the ones this computer has
+        // stopped claiming — telling the server it owns them a few lines
+        // earlier would put them straight back.
+        acknowledge_owned_roots(&store, &client, server_id).await;
+
         Ok(Reconciled::Active)
     }
 
@@ -1618,6 +1635,51 @@ fn profile_is_on(status: &str) -> bool {
 /// the server is refusing writes for — an error per file rather than one clear
 /// answer. A root the server does not mention at all counts as dropped: it is
 /// not in the profile it belongs to.
+/// Tell the server about every protected folder it has not been told about.
+///
+/// Ordering is the point of this function. A root is acknowledged only once it
+/// is committed to local storage, so the claim can never outlive the thing it
+/// claims: if this machine loses power between persisting and acknowledging,
+/// the row survives without an acknowledgement and the next pass sends it. The
+/// reverse order would let the server believe a folder is protected by a
+/// computer that has no record of it — which is the state that made a folder
+/// nobody was backing up read as "Up to date".
+///
+/// Failures are logged and left for the next pass. The server not hearing the
+/// claim today is not a reason to stop backing the folder up, and the row
+/// stays unacknowledged so it will be retried.
+pub async fn acknowledge_owned_roots(store: &SyncStore, client: &BackupClient, server_id: &str) {
+    let pending = match store.roots_awaiting_acknowledgement(server_id) {
+        Ok(pending) => pending,
+        Err(err) => {
+            tracing::warn!(code = %err.code, "could not read folders awaiting acknowledgement");
+            return;
+        }
+    };
+    for root in pending {
+        match client
+            .acknowledge_root(&root.kind, &root.display_name, &root.source_path_identifier)
+            .await
+        {
+            Ok(()) => {
+                if let Err(err) = store.mark_root_acknowledged(server_id, &root.id) {
+                    // The server has it; only the local note failed. Worst
+                    // case the same claim is sent again, which the server
+                    // upserts.
+                    tracing::warn!(code = %err.code, "acknowledgement could not be recorded");
+                }
+            }
+            Err(err) => {
+                tracing::info!(
+                    code = %err.code,
+                    root_id = %root.id,
+                    "could not tell the server this folder is backed up here; will retry"
+                );
+            }
+        }
+    }
+}
+
 fn roots_to_drop(local: &[Root], remote: &[bp::BackupRoot]) -> Vec<String> {
     local
         .iter()

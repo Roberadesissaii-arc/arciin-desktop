@@ -170,3 +170,104 @@ Two shapes the client deliberately does **not** send:
 Absolute Windows paths remain local under all of this. The watcher deals in
 them by necessity; what leaves the machine is still a root identity and a
 relative path.
+
+## Root ownership
+
+The server needs to know which folders a computer is actually backing up. It
+used to infer that from a root having files in it, which is wrong in both
+directions: a legitimately empty protected folder looks unprotected, and a
+folder no computer is backing up any more still looks protected, because the
+old files are still there.
+
+A real folder sat in that second state. The server reported it protected and
+"Up to date" while this client held no record of it and had never sent a byte
+of it — 809 MB on disk, zero uploaded. Anyone reading that screen would
+believe the folder was safe.
+
+Ownership is therefore **stated by the client**, never inferred. Two signals,
+both additive, neither requiring a protocol bump.
+
+### 1. Acknowledgement — `POST /api/backup/roots`
+
+Sent once per root, with the existing ArciinSync credential, **after** the root
+is committed to local SQLite and never before. The body is the shape the route
+already accepts:
+
+```json
+{
+  "kind": "CUSTOM",
+  "displayName": "Photos",
+  "sourcePathIdentifier": "9f86d081884c7d65" 
+}
+```
+
+- `sourcePathIdentifier` is the same opaque value the server was given when
+  the root was created. It is `SHA-256(serverId ‖ 0x00 ‖ kind ‖ 0x00 ‖
+  lowercased path)`, truncated to the first 16 bytes and hex-encoded, and it
+  is **not reversible into a path**.
+- The server already upserts on `(profileId, sourcePathIdentifier)`, so
+  repeats are safe and the client retries until one succeeds.
+- The client sends this **only** for a root it is backing up right now. The
+  existing handler sets `status: "PROTECTED"` on upsert, so an acknowledgement
+  for a removed root would silently re-protect it.
+
+### 2. Ownership in the heartbeat — `POST /api/backup/heartbeat`
+
+Every heartbeat carries the full set, so the server never has to accumulate
+state or guess what a missing acknowledgement meant:
+
+```json
+{
+  "health": "UP_TO_DATE",
+  "lastError": null,
+  "ownedRootSourceIdentifiers": ["9f86d081884c7d65", "2c26b46b68ffc68f"]
+}
+```
+
+**The field is optional, and absent is not empty.** The client omits it
+entirely when it cannot read its own configuration. An empty array means "this
+computer owns nothing"; an absent field means "no statement", and the server
+must not act on the latter.
+
+### What ownership means
+
+A root stays owned through every condition that is not removal:
+
+| Condition | Still owned? |
+| --- | --- |
+| Drive disconnected, folder unreadable | **yes** |
+| Folder held for review after a mass deletion | **yes** |
+| Backup paused | **yes** |
+| Offline, sync failing, errors outstanding | **yes** |
+| Application closed *(no heartbeat at all)* | **yes** — say nothing, conclude nothing |
+| The user removed the folder from Backup | **no** |
+
+Ownership is read from the stored configuration, not from which watchers are
+registered, so it is correct immediately after a restart, a Windows restart, or
+an offline launch.
+
+### What the server should do with it
+
+1. A root acknowledged by a computer is protected by that computer.
+2. A root **absent from a present `ownedRootSourceIdentifiers`** is no longer
+   held by that computer and may be disabled. Historical files must be kept:
+   removal ends protection, it does not delete a backup.
+3. Never infer protection from `fileCount`. An empty protected folder is
+   normal and must keep `fileCount: 0` without losing its status.
+4. A root the server holds that no computer ever acknowledges was created
+   without an owner. **This client cannot adopt it**: the identifier is a
+   one-way hash, so there is no way back to a Windows path, and a root that
+   arrives from `GET /api/backup/me` with no local folder to match cannot be
+   backed up by anybody. Such a root should be disabled, not left claiming to
+   be up to date.
+
+### Compatibility
+
+`ownedRootSourceIdentifiers` is an extra key on an existing request. The
+server's `heartbeatSchema` is a plain `z.object`, which **strips** unknown keys
+rather than rejecting them, so a server that predates this change accepts the
+heartbeat unchanged and ignores the field. No capability flag gates sending it
+and `BACKUP_PROTOCOL_VERSION` is unchanged.
+
+If the server ever makes that schema `.strict()`, this becomes a breaking
+change and the field would need a capability flag first.
