@@ -43,7 +43,7 @@ use crate::error::AppError;
 // `entries.synced_path` (where the server currently believes it lives, which
 // is what makes a rename a move rather than a re-upload), and `roots.status`
 // (a folder can be unavailable or held for safety without being disabled).
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// What the engine intends to do, or has done, with one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +141,19 @@ pub struct Entry {
     /// Never sent, never logged, never shown. It describes this machine's
     /// disk, which the server has no business knowing.
     pub file_id: Option<String>,
+}
+
+/// What the server needs to be told about a root this computer owns.
+///
+/// Separate from [`Root`] because it is the *wire* shape, and carries no local
+/// path — the whole point of the identifier is that the path stays here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootAcknowledgement {
+    pub id: String,
+    pub kind: String,
+    pub display_name: String,
+    /// Opaque. The only field of the four that may be sent.
+    pub source_path_identifier: String,
 }
 
 /// A protected root as this machine knows it.
@@ -385,6 +398,16 @@ impl SyncStore {
         add_column("entries", "synced_path", "synced_path TEXT")?;
         add_column("roots", "status", "status TEXT NOT NULL DEFAULT 'ACTIVE'")?;
         add_column("entries", "file_id", "file_id TEXT")?;
+        // What the server knows this folder as. Opaque, and the only thing
+        // about a root that may leave this machine.
+        add_column(
+            "roots",
+            "source_path_identifier",
+            "source_path_identifier TEXT",
+        )?;
+        // When this computer last told the server it owns the root. NULL means
+        // the server has never been told, so it must be told.
+        add_column("roots", "acknowledged_at", "acknowledged_at TEXT")?;
 
         // Finding the entry that used to be at a path is the whole point, and
         // it happens on every arrival the watcher reports.
@@ -404,6 +427,43 @@ impl SyncStore {
             [],
         )
         .map_err(map_write)?;
+
+        // Roots saved by an earlier version have no stored identifier. It is
+        // not lost: the identifier is a pure function of the server id, the
+        // kind and the lowercased path, all three of which are already in this
+        // row, so the same value the server was given at enable time is
+        // reproducible here rather than needing another round trip.
+        //
+        // `acknowledged_at` is deliberately left NULL for them. An upgraded
+        // install has never told the server it owns these folders, because
+        // until now there was nothing to tell it with.
+        let stale: Vec<(String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT server_id, id, kind, local_path
+                     FROM roots WHERE source_path_identifier IS NULL",
+                )
+                .map_err(map_read)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(map_read)?;
+            rows.collect::<Result<_, _>>().map_err(map_read)?
+        };
+        for (server_id, id, kind, local_path) in stale {
+            let identifier = crate::backup::known_folders::source_path_identifier_for_kind(
+                &server_id,
+                &kind,
+                std::path::Path::new(&local_path),
+            );
+            conn.execute(
+                "UPDATE roots SET source_path_identifier = ?1
+                 WHERE server_id = ?2 AND id = ?3",
+                params![identifier, server_id, id],
+            )
+            .map_err(map_write)?;
+        }
 
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .ok();
@@ -487,7 +547,7 @@ impl SyncStore {
         )
         .map_err(map_write)?;
         conn.execute(
-            "UPDATE roots SET enabled = 0 WHERE server_id = ?1",
+            "UPDATE roots SET enabled = 0, acknowledged_at = NULL WHERE server_id = ?1",
             params![server_id],
         )
         .map_err(map_write)?;
@@ -537,14 +597,24 @@ impl SyncStore {
     pub fn save_root(&self, server_id: &str, root: &Root) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO roots (id, server_id, kind, display_name, local_path, enabled, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            // The identifier is derived rather than passed in, so that every
+            // path which saves a root produces the same one the server was
+            // given — there is no second place to get it wrong.
+            //
+            // `acknowledged_at` is not touched on conflict. Re-saving a root
+            // whose display name changed is not a reason to tell the server
+            // about it again, and clearing it here would make every reconcile
+            // re-acknowledge every folder.
+            "INSERT INTO roots (id, server_id, kind, display_name, local_path, enabled, status,
+                                source_path_identifier)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(server_id, id) DO UPDATE SET
-                kind         = excluded.kind,
-                display_name = excluded.display_name,
-                local_path   = excluded.local_path,
-                enabled      = excluded.enabled,
-                status       = excluded.status",
+                kind                   = excluded.kind,
+                display_name           = excluded.display_name,
+                local_path             = excluded.local_path,
+                enabled                = excluded.enabled,
+                status                 = excluded.status,
+                source_path_identifier = excluded.source_path_identifier",
             params![
                 root.id,
                 server_id,
@@ -553,7 +623,74 @@ impl SyncStore {
                 root.local_path.to_string_lossy(),
                 root.enabled as i64,
                 root.status.as_str(),
+                crate::backup::known_folders::source_path_identifier_for_kind(
+                    server_id,
+                    &root.kind,
+                    &root.local_path,
+                ),
             ],
+        )
+        .map_err(map_write)?;
+        Ok(())
+    }
+
+    /// The folders this computer currently claims as its backup configuration.
+    ///
+    /// Ownership is `enabled`, and deliberately nothing else. A folder on a
+    /// disconnected drive, one held for review, one whose profile is paused
+    /// and one this machine simply cannot read today are all still folders
+    /// this computer is responsible for — the server must not conclude from a
+    /// flat network or an unplugged disk that the user stopped protecting
+    /// something. Only removal, which clears `enabled`, ends ownership.
+    pub fn owned_root_identifiers(&self, server_id: &str) -> Result<Vec<String>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path_identifier FROM roots
+                 WHERE server_id = ?1 AND enabled = 1
+                   AND source_path_identifier IS NOT NULL
+                 ORDER BY source_path_identifier",
+            )
+            .map_err(map_read)?;
+        let rows = stmt
+            .query_map(params![server_id], |row| row.get::<_, String>(0))
+            .map_err(map_read)?;
+        rows.collect::<Result<_, _>>().map_err(map_read)
+    }
+
+    /// Protected folders the server has not yet been told this computer owns.
+    pub fn roots_awaiting_acknowledgement(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<RootAcknowledgement>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, display_name, source_path_identifier FROM roots
+                 WHERE server_id = ?1 AND enabled = 1 AND acknowledged_at IS NULL
+                   AND source_path_identifier IS NOT NULL
+                 ORDER BY display_name",
+            )
+            .map_err(map_read)?;
+        let rows = stmt
+            .query_map(params![server_id], |row| {
+                Ok(RootAcknowledgement {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    display_name: row.get(2)?,
+                    source_path_identifier: row.get(3)?,
+                })
+            })
+            .map_err(map_read)?;
+        rows.collect::<Result<_, _>>().map_err(map_read)
+    }
+
+    /// Record that the server has been told this computer owns the root.
+    pub fn mark_root_acknowledged(&self, server_id: &str, root_id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE roots SET acknowledged_at = ?1 WHERE server_id = ?2 AND id = ?3",
+            params![chrono::Utc::now().to_rfc3339(), server_id, root_id],
         )
         .map_err(map_write)?;
         Ok(())
@@ -590,7 +727,12 @@ impl SyncStore {
     ) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE roots SET enabled = ?3 WHERE server_id = ?1 AND id = ?2",
+            // Ownership is re-asserted from scratch whenever this flips. A
+            // folder switched back on is news to the server, and one switched
+            // off must not keep a stale acknowledgement that would let it be
+            // re-claimed without the user asking for it.
+            "UPDATE roots SET enabled = ?3, acknowledged_at = NULL
+             WHERE server_id = ?1 AND id = ?2",
             params![server_id, root_id, enabled as i64],
         )
         .map_err(map_write)?;
@@ -918,7 +1060,8 @@ impl SyncStore {
         // prevent. Either both happen or neither does.
         let tx = conn.transaction().map_err(map_write)?;
         tx.execute(
-            "UPDATE roots SET enabled = 0 WHERE server_id = ?1 AND id = ?2",
+            "UPDATE roots SET enabled = 0, acknowledged_at = NULL
+             WHERE server_id = ?1 AND id = ?2",
             params![server_id, root_id],
         )
         .map_err(map_write)?;

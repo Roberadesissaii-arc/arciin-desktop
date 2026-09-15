@@ -108,12 +108,26 @@ pub fn source_path_identifier(
     kind: SyncRootKind,
     path: &std::path::Path,
 ) -> String {
+    source_path_identifier_for_kind(server_id, kind.as_str(), path)
+}
+
+/// The same identifier, for a kind that has already been stored as text.
+///
+/// The persisted root table keeps `kind` as the wire string, so recovering the
+/// identifier for a saved root does not need the enum back — and must not,
+/// because a kind the server sent that this build does not know would
+/// otherwise be silently rewritten into something else and hash differently.
+pub fn source_path_identifier_for_kind(
+    server_id: &str,
+    kind: &str,
+    path: &std::path::Path,
+) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(server_id.as_bytes());
     hasher.update([0]);
-    hasher.update(kind.as_str().as_bytes());
+    hasher.update(kind.as_bytes());
     hasher.update([0]);
     // Windows paths are case-insensitive, so the same folder reached by a
     // differently-cased path must hash the same.

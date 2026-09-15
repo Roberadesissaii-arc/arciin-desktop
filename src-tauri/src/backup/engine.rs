@@ -235,9 +235,10 @@ impl BackupEngine {
                 Err(fatal) => {
                     tracing::warn!(code = %fatal.code, "backup engine stopping");
                     *self.last_error.lock().unwrap() = Some(fatal.message.clone());
+                    let owned = self.owned_roots();
                     let _ = self
                         .client
-                        .heartbeat(BackupHealth::Error, Some(&fatal.code))
+                        .heartbeat(BackupHealth::Error, Some(&fatal.code), owned.as_deref())
                         .await;
                     return Err(fatal);
                 }
@@ -341,9 +342,31 @@ impl BackupEngine {
             return;
         }
         *last = std::time::Instant::now();
-        if let Err(err) = self.client.heartbeat(health, None).await {
+        let owned = self.owned_roots();
+        if let Err(err) = self.client.heartbeat(health, None, owned.as_deref()).await {
             // A missed heartbeat is not worth interrupting a backup for.
             tracing::info!(code = %err.code, "heartbeat failed");
+        }
+    }
+
+    /// The folders this computer claims, read fresh from local state.
+    ///
+    /// Read per heartbeat rather than cached at startup, so a folder the user
+    /// removes stops being claimed on the next beat instead of at the next
+    /// restart. Derived from the stored configuration and never from which
+    /// watchers happen to be registered: a folder on an unplugged drive holds
+    /// no watcher and is still very much this computer's to look after.
+    ///
+    /// On a read failure this returns `None`, which omits the field. Saying
+    /// nothing is right here — an empty list would read as "this computer owns
+    /// nothing", and the server would be entitled to act on it.
+    fn owned_roots(&self) -> Option<Vec<String>> {
+        match self.store.owned_root_identifiers(&self.server_id) {
+            Ok(owned) => Some(owned),
+            Err(err) => {
+                tracing::warn!(code = %err.code, "owned roots unreadable; omitting from heartbeat");
+                None
+            }
         }
     }
 }

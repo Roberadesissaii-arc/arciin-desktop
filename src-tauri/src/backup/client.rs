@@ -380,17 +380,65 @@ impl BackupClient {
         Ok(parsed.data)
     }
 
+    /// Tell the server this computer owns a root it has already persisted.
+    ///
+    /// The server upserts on `(profileId, sourcePathIdentifier)`, so calling
+    /// this twice for the same folder is the same as calling it once — which
+    /// matters, because it is retried until it succeeds.
+    ///
+    /// It is an *assertion of ownership*, and the server treats it as one by
+    /// marking the root protected. So it must only ever be sent for a folder
+    /// this computer is genuinely backing up right now; sending it for one the
+    /// user has removed would quietly protect it again behind their back.
+    pub async fn acknowledge_root(
+        &self,
+        kind: &str,
+        display_name: &str,
+        source_path_identifier: &str,
+    ) -> Result<(), AppError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            kind: &'a str,
+            display_name: &'a str,
+            source_path_identifier: &'a str,
+        }
+
+        let client = build_client(CONTROL_TIMEOUT)?;
+        let response = self
+            .authorize(client.post(self.url(bp::ROOTS_PATH)?))
+            .json(&Body {
+                kind,
+                display_name,
+                source_path_identifier,
+            })
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(backup_error(response).await);
+        }
+        Ok(())
+    }
+
     /// Report sync health. Throttled by the caller, not by this function.
+    ///
+    /// `owned_roots` is the folders this computer currently holds as backup
+    /// configuration. It is additive: the field is omitted entirely when the
+    /// caller has nothing to say, and a server that does not know about it
+    /// ignores it, so no capability check gates sending it.
     pub async fn heartbeat(
         &self,
         health: bp::BackupHealth,
         last_error: Option<&str>,
+        owned_roots: Option<&[String]>,
     ) -> Result<(), AppError> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Body<'a> {
             health: &'a str,
             last_error: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            owned_root_source_identifiers: Option<&'a [String]>,
         }
 
         let client = build_client(CONTROL_TIMEOUT)?;
@@ -399,6 +447,7 @@ impl BackupClient {
             .json(&Body {
                 health: health.as_str(),
                 last_error,
+                owned_root_source_identifiers: owned_roots,
             })
             .send()
             .await?;
