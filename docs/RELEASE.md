@@ -88,26 +88,64 @@ does not block publishing *source*.
 No self-signed certificate has been generated. A self-signed build is not
 production signing and calling it so would be worse than leaving it unsigned.
 
-### Enabling it later
+### The `.pfx` route no longer exists for new certificates
 
-The interface is already in `release.yml`. Add two repository secrets:
+The step currently in `release.yml` takes a base64-encoded `.pfx` and feeds it
+to `signtool`. **That route cannot be used with a certificate bought today.**
 
-| Secret | Value |
-| --- | --- |
-| `WINDOWS_CERTIFICATE` | the `.pfx`, base64-encoded |
-| `WINDOWS_CERTIFICATE_PASSWORD` | its password |
+Since June 2023 the CA/Browser Forum has required every publicly-trusted
+code-signing private key to be generated and held on hardware meeting FIPS
+140-2 Level 2 or Common Criteria EAL 4+. Certificate authorities no longer
+issue downloadable `.pfx` files at all — a new OV or EV certificate arrives on
+a USB token or in a CA-hosted HSM. A hardware token cannot be plugged into a
+GitHub-hosted runner, so the `.pfx` step is kept only as a working reference
+for a self-hosted runner that has one attached.
 
-The signing step is skipped entirely while `WINDOWS_CERTIFICATE` is absent, so
-the pipeline works today without pretending.
+For hosted CI the realistic options are a cloud signing service, and the step
+is replaced rather than configured.
+
+### What to do instead
+
+**Azure Artifact Signing** (called Trusted Signing until Microsoft renamed it
+in January 2026) is the recommendation for a company this size:
+
+- **$9.99/month** for 5,000 signatures (Basic); $99.99/month for 100,000
+  (Premium). We would sign a handful of files per release.
+- **No hardware.** Keys live in Microsoft's HSMs; certificates are short-lived
+  and rotated for you, so there is no annual renewal scramble and nothing to
+  lose in a drawer.
+- **A first-party GitHub Action** (`azure/trusted-signing-action`, now
+  `Azure/artifact-signing-action`), Windows runners only — which is what we
+  use. Authentication is OIDC, so there is no long-lived secret to leak.
+- **Eligibility**: verified businesses and self-employed individuals in the
+  US, Canada, EU or UK. Since April 2026 a self-employed applicant no longer
+  needs three years of trading history.
+
+A traditional certificate remains possible — roughly $250–400/year for OV and
+$250–700/year for EV, depending on reseller — but it brings a hardware token,
+a self-hosted runner to plug it into, and a renewal every 460 days now that
+maximum validity has dropped from 39 months.
+
+**EV is no longer worth paying extra for on SmartScreen grounds.** A 2024
+change to the Microsoft Trusted Root Program means reputation accrues by file
+hash and download volume rather than certificate class; EV no longer grants
+instant trust, and an OV-signed binary builds reputation the same way. Signed
+is what matters; the class does not.
+
+### What is needed from the owner
+
+Nothing in this repository. To enable signing:
+
+1. An Azure subscription and an Artifact Signing account, with the identity
+   verification Microsoft requires.
+2. A certificate profile under that account.
+3. An app registration federated to this repository, so the workflow
+   authenticates by OIDC rather than a stored secret.
+4. Three repository *variables* (not secrets): tenant id, client id,
+   subscription id. The signing step is then swapped for the Azure action.
 
 **Never commit** a `.pfx`, `.p12`, private key or password. `.gitignore`
 blocks those patterns, but the rule matters more than the file.
-
-What a certificate needs to be: an OV or EV code-signing certificate from a
-CA Windows trusts. EV gets SmartScreen reputation immediately; OV builds it
-over time. An HSM-backed or cloud signing service (Azure Trusted Signing,
-DigiCert KeyLocker) is preferable to a `.pfx` in CI secrets, and the step can
-be swapped for one without touching the rest of the pipeline.
 
 ### Verification
 
