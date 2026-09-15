@@ -78,8 +78,26 @@ jobs:
       #   WINDOWS_CERTIFICATE_PASSWORD  its password
       #
       # Never commit either. See docs/RELEASE.md.
+      # Whether a certificate is configured at all.
+      #
+      # Asked in its own step because a step's `if:` cannot see that same
+      # step's `env:` block — the env context there holds only workflow- and
+      # job-level values. Written the obvious way, the signing step below
+      # would be skipped *even with the secret present*, and the first anyone
+      # would know of it is an unsigned installer on the download page.
+      #
+      # Hoisting the secret to job-level env would also work and would put it
+      # in the environment of every unrelated step; this does not.
+      - name: Check for a signing certificate
+        id: signing
+        shell: pwsh
+        run: |
+          $have = if ("${{ secrets.WINDOWS_CERTIFICATE }}" -ne "") { "true" } else { "false" }
+          "configured=$have" >> $env:GITHUB_OUTPUT
+          Write-Output "signing certificate configured: $have"
+
       - name: Sign installer
-        if: ${{ env.WINDOWS_CERTIFICATE != '' }}
+        if: steps.signing.outputs.configured == 'true'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
