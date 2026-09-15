@@ -109,14 +109,14 @@ pub struct ScanProgress {
 /// identities. The protocol is explicit that the client skips them and the
 /// server must not assume otherwise.
 #[cfg(windows)]
-fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
-fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     metadata.is_symlink()
 }
 
@@ -126,7 +126,7 @@ fn excluded_name(name: &str) -> bool {
         .any(|banned| banned.eq_ignore_ascii_case(name))
 }
 
-fn modified_ms(metadata: &std::fs::Metadata) -> i64 {
+pub fn modified_ms(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
         .ok()

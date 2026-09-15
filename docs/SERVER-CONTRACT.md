@@ -144,3 +144,29 @@ not returned in V1.
   reports `webUrl: http://192.168.1.51:3002` while actually serving on
   `192.168.1.50:3002`. The client therefore connects to the origin it
   successfully fetched the manifest from and uses `webUrl` for nothing.
+
+## What the watcher sends
+
+Nothing new. The watcher decides *when* and *which* of the existing calls are
+made; it introduces no endpoint, no field and no header.
+
+| Local event | Call | Notes |
+| --- | --- | --- |
+| A file appears or changes | `POST /api/backup/files` | The bytes are read when the request is made, not when the event arrived |
+| A folder appears | `POST /api/backup/folders` | Parents first, always |
+| Something is renamed or moved within one protected folder | `POST /api/backup/entries/:id/move` | Same `clientEntryId`, so the server keeps its identity and its history |
+| Something is deleted | `POST /api/backup/entries/:id/tombstone` | Soft delete. This client never destroys anything on the server |
+
+Two shapes the client deliberately does **not** send:
+
+- **A move between two protected folders.** Each root has its own opaque
+  identity, and one entry cannot belong to both. It is a tombstone in the
+  folder it left and an upload in the one it arrived in.
+- **Anything at all when a folder cannot be read.** A disconnected drive
+  presents exactly as "every file was deleted". The client reports the folder
+  unavailable and sends nothing, because the alternative is tombstoning
+  somebody's backup because a cable came loose.
+
+Absolute Windows paths remain local under all of this. The watcher deals in
+them by necessity; what leaves the machine is still a root identity and a
+relative path.

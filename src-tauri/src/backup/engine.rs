@@ -29,7 +29,7 @@ use tokio::sync::Semaphore;
 
 use crate::backup::client::{classify, BackupClient, Retry};
 use crate::backup::protocol::BackupHealth;
-use crate::backup::store::{Entry, EntryType, SyncState, SyncStore};
+use crate::backup::store::{Entry, EntryType, Intent, RootStatus, SyncState, SyncStore};
 use crate::error::AppError;
 
 /// Simultaneous transfers.
@@ -365,6 +365,12 @@ async fn send_entry(
     if !root.enabled {
         return Ok(());
     }
+    // A folder that cannot be read, or one being held after a mass change, is
+    // not a folder to act on. Its queue stays exactly as it is until somebody
+    // or something resolves the state.
+    if root.status != RootStatus::Active {
+        return Ok(());
+    }
 
     // Reuse the key from an interrupted attempt; otherwise mint one. Either
     // way it is persisted before the request leaves.
@@ -374,16 +380,75 @@ async fn send_entry(
         .unwrap_or_else(new_operation_id);
     store.begin_operation(server_id, &entry.client_entry_id, &operation_id)?;
 
-    let outcome = match entry.entry_type {
-        EntryType::Folder => client
-            .create_folder(
+    // Removal first, because it is the one intent that does not care what is
+    // on disk — by the time it is queued the thing is already gone.
+    if entry.intent == Intent::Tombstone {
+        let result = client
+            .tombstone_entry(&root.id, &entry.client_entry_id, &operation_id)
+            .await;
+        return finish(
+            server_id,
+            store,
+            stats,
+            &entry,
+            result.map(|_| ()),
+            SyncState::Tombstoned,
+        );
+    }
+
+    // A move keeps the entry's identity, so the server keeps its history and
+    // its bytes. The alternative — upload to the new path, tombstone the old —
+    // re-sends the whole file to say something the server could have been told
+    // in one small request, and briefly shows the user two copies.
+    if entry.intent == Intent::Move {
+        let result = client
+            .move_entry(
                 &root.id,
                 &entry.client_entry_id,
                 &entry.relative_path,
                 &operation_id,
             )
-            .await
-            .map(|_| ()),
+            .await;
+        return finish(
+            server_id,
+            store,
+            stats,
+            &entry,
+            result.map(|_| ()),
+            SyncState::Synced,
+        );
+    }
+
+    let outcome = match entry.entry_type {
+        EntryType::Folder => {
+            // A folder that is gone locally is a removal, exactly as a file
+            // would be. Without this a deleted directory is re-created on the
+            // server on every pass.
+            let absolute = root.local_path.join(entry.relative_path.replace('/', "\\"));
+            if !absolute.is_dir() {
+                tracing::info!("a queued folder no longer exists; recording a tombstone");
+                let result = client
+                    .tombstone_entry(&root.id, &entry.client_entry_id, &operation_id)
+                    .await;
+                return finish(
+                    server_id,
+                    store,
+                    stats,
+                    &entry,
+                    result.map(|_| ()),
+                    SyncState::Tombstoned,
+                );
+            }
+            client
+                .create_folder(
+                    &root.id,
+                    &entry.client_entry_id,
+                    &entry.relative_path,
+                    &operation_id,
+                )
+                .await
+                .map(|_| ())
+        }
         EntryType::File => {
             let absolute = root.local_path.join(entry.relative_path.replace('/', "\\"));
 
@@ -402,6 +467,28 @@ async fn send_entry(
                     result.map(|_| ()),
                     SyncState::Tombstoned,
                 );
+            }
+
+            // Still being written? Then not yet.
+            //
+            // A large file arrives over seconds or minutes — a download, a
+            // video export, a copy from a slow drive — and the watcher reports
+            // it long before it is finished. Uploading now would send a
+            // truncated file and, worse, mark it synced: the server would hold
+            // a corrupt copy and nothing would ever revisit it.
+            //
+            // Leaving it PENDING costs one more pass. The engine comes back
+            // within seconds and the file is either finished or still growing,
+            // in which case it waits again. There is no upper bound on how
+            // long a legitimate write may take, so there is no timeout here —
+            // only a refusal to send something that is visibly still changing.
+            if let Some(unstable) = still_being_written(&absolute) {
+                tracing::info!(
+                    grew_by = unstable,
+                    "a file is still being written; leaving it queued"
+                );
+                store.complete_operation(server_id, &entry.client_entry_id, SyncState::Pending)?;
+                return Ok(());
             }
 
             // Re-read metadata: if the file changed while queued, the bytes
@@ -430,6 +517,47 @@ async fn send_entry(
     };
 
     finish(server_id, store, stats, &entry, outcome, SyncState::Synced)
+}
+
+/// How much a file grew while we watched it, if it is still changing.
+///
+/// Two samples a short interval apart. Cheap, bounded, and it answers the only
+/// question that matters before an upload: is anybody still writing to this?
+///
+/// Deliberately not a lock and not an exclusive open. Taking either would make
+/// this client the reason somebody's save failed, which is a far worse failure
+/// than uploading a file a few seconds later than it could have.
+///
+/// `None` means stable, or unreadable — an unreadable file is left to the
+/// upload itself to fail honestly, rather than being silently deferred forever.
+pub fn still_being_written(path: &std::path::Path) -> Option<u64> {
+    const SETTLE: Duration = Duration::from_millis(400);
+
+    let first = std::fs::metadata(path).ok()?;
+    // Only files that look recently touched are worth pausing for. An old
+    // file is not being written, and sampling every queued entry would add
+    // this delay to every upload in a large backup.
+    let recent = first
+        .modified()
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_none_or(|since| since < Duration::from_secs(5));
+    if !recent {
+        return None;
+    }
+
+    std::thread::sleep(SETTLE);
+
+    let second = std::fs::metadata(path).ok()?;
+    if second.len() != first.len() {
+        return Some(second.len().saturating_sub(first.len()));
+    }
+    // A file being rewritten in place keeps its length and changes its
+    // timestamp, so length alone is not enough.
+    if second.modified().ok() != first.modified().ok() {
+        return Some(0);
+    }
+    None
 }
 
 /// Record the result of one operation.

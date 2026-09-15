@@ -175,6 +175,13 @@ pub struct BackupState {
     /// True only while backup is actually on. Kept as its own field because
     /// almost every caller wants the plain question, not the three-way one.
     pub enabled: bool,
+    /// Whether protected folders are being watched right now.
+    ///
+    /// Worth saying out loud, because the honest answer changes what the user
+    /// should expect. Watched means a change reaches Arciin in seconds; not
+    /// watched means it reaches Arciin at the next check, which is a very
+    /// different promise.
+    pub watching: bool,
     /// The three states the UI has to tell apart. `enabled` collapses the last
     /// two, and collapsing them is what made stopping backup a dead end: a
     /// computer that had been set up and switched off looked exactly like one
@@ -214,6 +221,12 @@ pub struct ProtectedRootView {
     /// record of where they came from. The screen has to be able to say so,
     /// and must not offer to open a folder that is not there.
     pub local_path_exists: bool,
+    /// `ACTIVE`, `UNAVAILABLE`, or `SAFETY_HOLD`.
+    ///
+    /// Separate from `enabled`, and the difference is the whole point: a
+    /// folder Arciin cannot read, or one it has stopped touching after an
+    /// unusually large change, is not a folder anybody switched off.
+    pub status: String,
     pub file_count: i64,
     pub pending: i64,
     pub failed: i64,
@@ -237,6 +250,12 @@ pub struct BackupManager {
     /// Where turning backup on has got to, for the UI and for refusing a
     /// second concurrent attempt.
     activation: std::sync::Mutex<Option<ActivationStage>>,
+    /// Watches the protected folders and reconciles them.
+    ///
+    /// One per manager, deliberately. The failure it prevents is a folder
+    /// being watched twice — after a resume, after a reconnect, after backup
+    /// is turned off and on again — with every change then queued twice.
+    supervisor: crate::backup::supervisor::Supervisor,
 }
 
 impl BackupManager {
@@ -575,6 +594,7 @@ impl BackupManager {
                     display_name: server_root.display_name.clone(),
                     local_path: folder.path.clone(),
                     enabled: true,
+                    status: crate::backup::store::RootStatus::Active,
                 },
             )?;
         }
@@ -783,6 +803,7 @@ impl BackupManager {
                     store,
                     server_id,
                     &root.id,
+                    &root.local_path,
                     &folder.relative_path,
                     EntryType::Folder,
                     0,
@@ -794,6 +815,7 @@ impl BackupManager {
                     store,
                     server_id,
                     &root.id,
+                    &root.local_path,
                     &file.relative_path,
                     EntryType::File,
                     file.size_bytes as i64,
@@ -822,6 +844,7 @@ impl BackupManager {
         store: &Arc<SyncStore>,
         server_id: &str,
         root_id: &str,
+        root_path: &std::path::Path,
         relative_path: &str,
         entry_type: EntryType,
         size_bytes: i64,
@@ -852,7 +875,19 @@ impl BackupManager {
                 size_bytes,
                 modified_ms,
                 state,
-                pending_operation_id: existing.and_then(|e| e.pending_operation_id),
+                pending_operation_id: existing
+                    .as_ref()
+                    .and_then(|e| e.pending_operation_id.clone()),
+                // A scan says what is on disk, which is always an upsert. The
+                // watcher is what knows a move happened; a scan that finds a
+                // file somewhere new cannot tell it from a copy.
+                intent: crate::backup::store::Intent::Upsert,
+                // Preserved, not recomputed: where the server has it does not
+                // change because we looked at the disk again.
+                synced_path: existing.and_then(|e| e.synced_path),
+                file_id: crate::backup::identity::identify(
+                    &root_path.join(relative_path.replace('/', "\\")),
+                ),
             },
         )
     }
@@ -889,6 +924,20 @@ impl BackupManager {
         *self.running.lock().unwrap() = Some(RunningEngine {
             control: control.clone(),
         });
+
+        // Watching begins with the engine and ends with it. Anything else
+        // leaves a watcher running for a profile that is not backing up.
+        if let Err(err) = self
+            .supervisor
+            .start(Arc::clone(&store), server_id.to_string())
+        {
+            // Not fatal. Without a watcher the client still syncs — it simply
+            // waits for the next reconciliation rather than reacting.
+            tracing::warn!(
+                code = %err.code,
+                "protected folders could not be watched; backup will rely on periodic checks"
+            );
+        }
 
         let engine = BackupEngine::new(server_id.to_string(), client, Arc::clone(&store), control);
         let server = server_id.to_string();
@@ -935,6 +984,93 @@ impl BackupManager {
         if let Some(running) = self.running.lock().unwrap().take() {
             running.control.stop();
         }
+        // The watcher goes too. A watcher that outlives the engine keeps
+        // reading somebody's folders and filling a queue nothing will drain —
+        // and after a revocation, keeps reading them after they said stop.
+        self.supervisor.stop();
+    }
+
+    /// Ask for every protected folder to be read again, as soon as possible.
+    ///
+    /// The honest response to any moment when the event stream cannot be
+    /// trusted: waking from sleep, reconnecting, resuming after a pause. None
+    /// of those know what changed, and none of them should guess.
+    pub fn request_reconcile(&self) {
+        self.supervisor.pending.request_all();
+    }
+
+    /// Accept a large change the safety guard held, and carry on.
+    ///
+    /// The hold exists because a folder emptying itself is far more often a
+    /// fault — an unplugged drive, a failed sync from something else, a
+    /// permissions change — than an intention. Clearing it is the user saying
+    /// the deletions were real, so the next pass may act on them.
+    ///
+    /// Nothing is removed by this call itself. It only lets the folder be read
+    /// again; if the files have come back in the meantime, the next pass finds
+    /// them and removes nothing at all.
+    pub fn resolve_safety_hold(
+        &self,
+        app: &tauri::AppHandle,
+        server_id: &str,
+        root_id: &str,
+    ) -> Result<BackupState, AppError> {
+        let store = self.store(app)?;
+        let Some(root) = store
+            .roots(server_id)?
+            .into_iter()
+            .find(|root| root.id == root_id)
+        else {
+            return Err(from_code("BACKUP_ROOT_NOT_FOUND"));
+        };
+
+        // Carry out the removals here, rather than merely clearing the hold.
+        //
+        // Clearing it alone does not work: the next pass finds exactly the
+        // same disappearances and holds again, so the button would appear to
+        // do nothing. Confirming has to be the act that performs what is being
+        // confirmed.
+        //
+        // The disk is still read first. If the files are back — the drive was
+        // reconnected, the folder restored — this removes nothing, which is
+        // the right answer to a confirmation that has been overtaken.
+        let cancel = crate::backup::scan::CancelFlag::new();
+        let outcome = crate::backup::reconcile::reconcile_root_confirming_removals(
+            &store, server_id, &root, &cancel,
+        )?;
+        tracing::info!(
+            server_id,
+            root_id,
+            ?outcome,
+            "a held folder was released by the user"
+        );
+
+        store.set_root_status(server_id, root_id, crate::backup::store::RootStatus::Active)?;
+        self.refresh_watchers(&store, server_id);
+        self.state(app, server_id)
+    }
+
+    /// Bring the watcher's registrations back in line with the folder list.
+    ///
+    /// Never fatal: a folder that cannot be watched is still reconciled, so
+    /// the worst case is that it stops feeling immediate.
+    fn refresh_watchers(&self, store: &Arc<SyncStore>, server_id: &str) {
+        if !self.supervisor.is_running() {
+            return;
+        }
+        if let Err(err) = self.supervisor.refresh(store, server_id) {
+            tracing::warn!(code = %err.code, "watched folders could not be updated");
+        }
+    }
+
+    /// Whether protected folders are currently being watched.
+    pub fn is_watching(&self) -> bool {
+        self.supervisor.is_running()
+    }
+
+    /// Which folders the watcher currently holds a registration for.
+    pub fn watched_roots(&self) -> Vec<String> {
+        self.supervisor.watcher.registered()
     }
 
     pub fn pause(&self, app: &tauri::AppHandle, server_id: &str) -> Result<(), AppError> {
@@ -948,6 +1084,11 @@ impl BackupManager {
         if let Some(running) = self.running.lock().unwrap().as_ref() {
             running.control.resume();
         }
+        // Whatever happened while backup was paused, the event stream is not a
+        // reliable account of it — it may have overflowed, and the debouncer's
+        // window closed long ago. Read the folders instead of resuming from
+        // assumptions about them.
+        self.request_reconcile();
         self.store(app)?.set_paused(server_id, false)
     }
 
@@ -957,6 +1098,7 @@ impl BackupManager {
         let Some(profile) = store.profile(server_id)? else {
             return Ok(BackupState {
                 enabled: false,
+                watching: false,
                 lifecycle: Lifecycle::NotSetUp,
                 status: None,
                 roots: Vec::new(),
@@ -971,6 +1113,7 @@ impl BackupManager {
         if !profile.enabled {
             return Ok(BackupState {
                 enabled: false,
+                watching: false,
                 lifecycle: Lifecycle::Disabled,
                 status: None,
                 activation: self.stage(),
@@ -990,6 +1133,7 @@ impl BackupManager {
                             .root_progress(server_id, &root.id)
                             .unwrap_or((0, 0, 0, 0));
                         ProtectedRootView {
+                            status: root.status.as_str().to_string(),
                             local_path_exists: local_folder_exists(&root.local_path),
                             local_path: root.local_path.to_string_lossy().into_owned(),
                             id: root.id,
@@ -1009,7 +1153,24 @@ impl BackupManager {
 
         let (synced, outstanding, failed, bytes, pending_bytes) = store.progress(server_id)?;
         let paused = profile.paused;
-        let health = if paused {
+        let roots = store.roots(server_id)?;
+
+        // A folder that cannot be read, or one held after a large change, is
+        // more important than the queue length. "Up to date" while a protected
+        // folder is unreachable would be the client's most misleading possible
+        // claim: it is precisely when somebody needs to know.
+        let needs_attention = roots.iter().any(|root| {
+            root.enabled
+                && matches!(
+                    root.status,
+                    crate::backup::store::RootStatus::Unavailable
+                        | crate::backup::store::RootStatus::SafetyHold
+                )
+        });
+
+        let health = if needs_attention {
+            bp::BackupHealth::Error
+        } else if paused {
             bp::BackupHealth::Paused
         } else if outstanding > 0 {
             bp::BackupHealth::Syncing
@@ -1019,6 +1180,7 @@ impl BackupManager {
 
         Ok(BackupState {
             enabled: true,
+            watching: self.is_watching(),
             lifecycle: Lifecycle::Active,
             activation: self.stage(),
             last_backup_at: store.last_synced_at(server_id)?,
@@ -1032,14 +1194,14 @@ impl BackupManager {
                 paused,
                 last_error: None,
             }),
-            roots: store
-                .roots(server_id)?
+            roots: roots
                 .into_iter()
                 .map(|root| {
                     let (files, pending, failed, bytes) = store
                         .root_progress(server_id, &root.id)
                         .unwrap_or((0, 0, 0, 0));
                     ProtectedRootView {
+                        status: root.status.as_str().to_string(),
                         local_path_exists: local_folder_exists(&root.local_path),
                         local_path: root.local_path.to_string_lossy().into_owned(),
                         id: root.id,
@@ -1089,6 +1251,9 @@ impl BackupManager {
         client.disable_root(root_id).await?;
 
         store.disable_root(server_id, root_id)?;
+        // Unregistered now, not at the next tick. Every event that arrives in
+        // between is work queued for a folder the server has already refused.
+        self.refresh_watchers(&store, server_id);
         tracing::info!(server_id, root_id, "a folder is no longer being backed up");
         self.state(app, server_id)
     }
@@ -1316,6 +1481,7 @@ impl BackupManager {
         let client = BackupClient::new(origin.clone(), credential);
         client.enable_root(root_id).await?;
         store.set_root_enabled(server_id, root_id, true)?;
+        self.refresh_watchers(&store, server_id);
 
         tracing::info!(server_id, root_id, "a folder is being protected again");
 
@@ -1658,6 +1824,7 @@ mod custom_folder_tests {
             display_name: "TestBackup".into(),
             local_path: std::path::PathBuf::from(r"D:\Profiles\TestUser\TestBackup"),
             enabled,
+            status: crate::backup::store::RootStatus::Active,
         }
     }
 
@@ -2082,6 +2249,7 @@ mod custom_folder_tests {
                     display_name: "TestBackup".into(),
                     local_path: path.clone(),
                     enabled: true,
+                    status: crate::backup::store::RootStatus::Active,
                 },
             )
             .unwrap();
@@ -2111,6 +2279,7 @@ mod custom_folder_tests {
                     display_name: "TestBackup".into(),
                     local_path: path,
                     enabled: true,
+                    status: crate::backup::store::RootStatus::Active,
                 },
             )
             .unwrap();

@@ -181,8 +181,9 @@ would sign people out on every update — which is exactly the bug that
 
 Public distribution is **BLOCKED** until every box is ticked.
 
-- [ ] Continuous filesystem watcher complete and certified
-- [ ] Reconciliation after offline changes complete
+- [x] Continuous filesystem watcher complete
+- [x] Reconciliation after offline changes complete
+- [ ] Watcher certified on a second machine and over a long run
 - [x] Root disable/reactivate lifecycle integrated server-side
 - [x] Profile stop/re-enable integrated — the server disables the profile and
       revokes the grant, the client keeps the profile and folder list so it can

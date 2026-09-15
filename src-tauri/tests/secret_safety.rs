@@ -234,6 +234,7 @@ fn the_local_database_never_stores_a_credential() {
                 display_name: "TestBackup".into(),
                 local_path: std::path::PathBuf::from(r"D:\Profiles\TestUser\TestBackup"),
                 enabled: true,
+                status: arciin_desktop_lib::backup::store::RootStatus::Active,
             },
         )
         .expect("root saves");
@@ -271,6 +272,7 @@ fn what_the_renderer_receives_carries_no_credential() {
     // being added here, so this asserts the shape rather than a value.
     let state = BackupState {
         enabled: true,
+        watching: true,
         lifecycle: Lifecycle::Active,
         activation: None,
         last_backup_at: Some("2026-09-14T20:00:00Z".into()),
@@ -291,6 +293,7 @@ fn what_the_renderer_receives_carries_no_credential() {
             enabled: true,
             local_path: r"D:\Profiles\TestUser\TestBackup".into(),
             local_path_exists: true,
+            status: "ACTIVE".into(),
             file_count: 12,
             pending: 0,
             failed: 0,

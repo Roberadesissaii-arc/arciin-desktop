@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import {
+  AlertTriangle,
   FolderClosed,
   FolderOpen,
   FolderPlus,
@@ -37,7 +38,12 @@ import { ScrollHint, useScrollHint } from "@/components/scroll"
 import { Button, LinkButton, Message } from "@/components/ui"
 import { HealthBadge } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
-import { describeDormantFolder, formatBytes, formatCount } from "@/lib/format"
+import {
+  describeBackupStatus,
+  describeDormantFolder,
+  describeProtectedFolder,
+  formatBytes,
+} from "@/lib/format"
 import type {
   AppError,
   BackupState,
@@ -125,6 +131,10 @@ export function BackupCenterScreen({
   ]
   // A known folder already on the list must not be offered a second time —
   // including a switched-off one, which has its own Resume control in place.
+  // Held after an unusually large change. Surfaced at the top rather than as
+  // a line in a list: it is the one state where backup has stopped and only
+  // the person looking at the folder can say whether it should start again.
+  const held = all.filter((root) => root.enabled && root.status === "SAFETY_HOLD")
   const listedKinds = new Set(all.map((root) => root.kind))
   const available = known.filter((folder) => !listedKinds.has(folder.kind))
 
@@ -164,7 +174,20 @@ export function BackupCenterScreen({
             {deviceName} &middot; backed up privately to your Arciin server
           </p>
         </div>
-        {status ? <HealthBadge health={status.health} /> : null}
+        {status ? (
+          <div style={{ textAlign: "right" }}>
+            <HealthBadge health={status.health} />
+            {/*
+              What it is actually doing, in words. The badge is a colour; this
+              is the sentence — and it never invents a percentage, because
+              byte-accurate progress is not knowable while a scan is still
+              discovering files.
+            */}
+            <p style={{ margin: "4px 0 0", fontSize: 11.5, color: "var(--text-secondary)" }}>
+              {state ? describeBackupStatus(state) : null}
+            </p>
+          </div>
+        ) : null}
       </div>
 
       <StorageSummary storage={storage} status={status} />
@@ -179,6 +202,46 @@ export function BackupCenterScreen({
 
       {status?.lastError ? <Message>{status.lastError}</Message> : null}
       {error ? <Message>{error.message}</Message> : null}
+
+      {/*
+        The safety hold, explained where it happened.
+
+        Three things have to be said, because each is a thing somebody
+        reasonably fears: backup stopped, the server copies are still there,
+        and getting it going again is one button. Saying only the first would
+        be the cruellest possible version of this message.
+      */}
+      {held.map((root) => (
+        <div key={root.id} className="card stack stack--tight">
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
+            <AlertTriangle size={14} aria-hidden style={{ verticalAlign: -2, marginRight: 6 }} />
+            <strong>Backup paused for {root.displayName}.</strong>
+          </p>
+          <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+            A lot of files disappeared from this folder at once. Arciin has{" "}
+            <strong>not removed the copies on your server</strong> and will not
+            until you say so &mdash; a disconnected drive looks exactly like
+            this, and so does a folder that was moved.
+          </p>
+          <div className="row" style={{ gap: 8 }}>
+            <Button
+              compact
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void run(ipc.backupRescan)}
+            >
+              Check again
+            </Button>
+            <Button
+              compact
+              disabled={busy}
+              onClick={() => void run(() => ipc.backupResolveSafetyHold(root.id))}
+            >
+              The files really are gone
+            </Button>
+          </div>
+        </div>
+      ))}
 
       <section>
         <div className="row row--between" style={{ marginBottom: 6 }}>
@@ -236,14 +299,7 @@ export function BackupCenterScreen({
                   </span>
                   <span className="folder__meta">
                     {root.enabled ? (
-                      <>
-                        {formatCount(root.fileCount)} files &middot;{" "}
-                        {formatBytes(root.bytesSynced)}
-                        {root.pending > 0
-                          ? ` · ${formatCount(root.pending)} pending`
-                          : ""}
-                        {root.failed > 0 ? ` · ${formatCount(root.failed)} failed` : ""}
-                      </>
+                      describeProtectedFolder(root)
                     ) : (
                       // What is actually on the server, per folder. A blanket
                       // "still stored on your server" would be a lie for a

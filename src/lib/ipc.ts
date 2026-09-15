@@ -162,6 +162,21 @@ export function backupResumeRoot(rootId: string): Promise<BackupState> {
   return call<BackupState>("backup_resume_root", { rootId })
 }
 
+/**
+ * Accept a large change that was held for safety, and let the folder resume.
+ *
+ * Nothing is removed by this call. It only lets the folder be read again; if
+ * the files have come back, the next check finds them and removes nothing.
+ */
+export function backupResolveSafetyHold(rootId: string): Promise<BackupState> {
+  return call<BackupState>("backup_resolve_safety_hold", { rootId })
+}
+
+/** Read every protected folder again now, rather than waiting for the timer. */
+export function backupRescan(): Promise<void> {
+  return call<void>("backup_rescan")
+}
+
 /** Open a protected folder in File Explorer, resolved natively by id. */
 export function backupOpenRoot(rootId: string): Promise<void> {
   return call<void>("backup_open_root", { rootId })
