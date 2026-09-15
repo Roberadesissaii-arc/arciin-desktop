@@ -180,6 +180,36 @@ impl Supervisor {
                 let full = all || slept || due_now || last_full.elapsed() >= RECONCILE_INTERVAL;
                 due_now = false;
 
+                if slept {
+                    // The whole resume sequence, not merely a fuller pass:
+                    // handles Windows may have invalidated are replaced too.
+                    let store = Arc::clone(&store_for_sink);
+                    let server = server_id.clone();
+                    let watcher_for_resume = Arc::clone(&watcher);
+                    let pending_for_resume = Arc::clone(&pending);
+                    let resumed = tauri::async_runtime::spawn_blocking(move || {
+                        resume_after_gap(&store, &server, &watcher_for_resume, &pending_for_resume)
+                    })
+                    .await;
+                    match resumed {
+                        Ok(Ok(summary)) => {
+                            last_full = std::time::Instant::now();
+                            tracing::info!(
+                                watchable = summary.watchable,
+                                unavailable = summary.unavailable,
+                                registered = summary.registered,
+                                "resumed after a gap"
+                            );
+                        }
+                        Ok(Err(err)) => {
+                            tracing::warn!(code = %err.code, "resuming after a gap failed")
+                        }
+                        Err(_) => tracing::warn!("resuming after a gap was interrupted"),
+                    }
+                    tokio::time::sleep(TICK).await;
+                    continue;
+                }
+
                 if full || !requested.is_empty() {
                     let store = Arc::clone(&store);
                     let server = server_id.clone();
@@ -280,6 +310,68 @@ fn sink(
                 );
             }
         }
+    })
+}
+
+/// What a resume did, so it can be asserted on rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resumed {
+    /// Folders readable and protected after the gap.
+    pub watchable: usize,
+    /// Folders that could not be read — unplugged, unmounted, refused.
+    pub unavailable: usize,
+    /// Registrations held afterwards. Must equal `watchable`, and must not
+    /// have grown: a resume that registers a folder it was already watching
+    /// uploads every change twice.
+    pub registered: usize,
+}
+
+/// Everything that has to happen after the event stream had a hole in it.
+///
+/// Waking from sleep is the obvious cause, but not the only one: a stalled
+/// disk, a starved process, a watcher error. They all mean the same thing —
+/// notifications were missed, and possibly the handles that were meant to
+/// deliver them are stale too.
+///
+/// Extracted from the loop so it can be tested directly. Asserting that a gap
+/// was *detected* proves nothing; what matters is what follows it, and that is
+/// this:
+///
+/// 1. every protected folder is read again, which is also the availability
+///    check — a folder that cannot be read reports unavailable and queues no
+///    deletions
+/// 2. the watcher is registered against the folders that qualify *now*,
+///    replacing handles Windows may have invalidated while suspended
+/// 3. the queue resumes on its own, because the engine polls it
+///
+/// The server connectivity check is deliberately not here. The engine verifies
+/// the grant before every run and reports it honestly; duplicating that would
+/// mean two places deciding what "reachable" means.
+pub fn resume_after_gap(
+    store: &Arc<SyncStore>,
+    server_id: &str,
+    watcher: &WatcherManager,
+    pending: &Arc<Pending>,
+) -> Result<Resumed, AppError> {
+    let roots = reconcile_pass(store, server_id, None)?;
+
+    let watchable_now = watchable(&roots);
+    watcher.watch(
+        &watchable_now,
+        sink(
+            Arc::clone(store),
+            server_id.to_string(),
+            Arc::clone(pending),
+        ),
+    )?;
+
+    Ok(Resumed {
+        watchable: watchable_now.len(),
+        unavailable: roots
+            .iter()
+            .filter(|root| root.enabled && root.status == RootStatus::Unavailable)
+            .count(),
+        registered: watcher.registered().len(),
     })
 }
 

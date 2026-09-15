@@ -803,6 +803,7 @@ impl BackupManager {
                     store,
                     server_id,
                     &root.id,
+                    &root.local_path,
                     &folder.relative_path,
                     EntryType::Folder,
                     0,
@@ -814,6 +815,7 @@ impl BackupManager {
                     store,
                     server_id,
                     &root.id,
+                    &root.local_path,
                     &file.relative_path,
                     EntryType::File,
                     file.size_bytes as i64,
@@ -842,6 +844,7 @@ impl BackupManager {
         store: &Arc<SyncStore>,
         server_id: &str,
         root_id: &str,
+        root_path: &std::path::Path,
         relative_path: &str,
         entry_type: EntryType,
         size_bytes: i64,
@@ -882,6 +885,9 @@ impl BackupManager {
                 // Preserved, not recomputed: where the server has it does not
                 // change because we looked at the disk again.
                 synced_path: existing.and_then(|e| e.synced_path),
+                file_id: crate::backup::identity::identify(
+                    &root_path.join(relative_path.replace('/', "\\")),
+                ),
             },
         )
     }

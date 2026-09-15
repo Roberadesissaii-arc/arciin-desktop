@@ -34,12 +34,16 @@ use crate::error::AppError;
 // this computer stays paired, and the row has to outlive that so the folders
 // can be offered back.
 //
+// 4 added `entries.file_id`: the file's own identity on this volume, so a
+// file that moved is recognised as the same file rather than matched on name
+// and size, which collide.
+//
 // 3 added the watcher's intent model: `entries.intent` (what the sync should
 // do with this entry, not merely that something happened to it),
 // `entries.synced_path` (where the server currently believes it lives, which
 // is what makes a rename a move rather than a re-upload), and `roots.status`
 // (a folder can be unavailable or held for safety without being disabled).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// What the engine intends to do, or has done, with one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,16 @@ pub struct Entry {
     /// the new bytes. Without it, a renamed 2 GB file is a fresh upload and a
     /// separate deletion.
     pub synced_path: Option<String>,
+    /// This file's identity on its volume, if the filesystem supplies one.
+    ///
+    /// Local only. It is how a file that moved is recognised as the same file
+    /// — the alternative, matching on name, size and modification time, picks
+    /// the wrong file in any folder that holds several alike, and moving the
+    /// wrong one loses the file it lands on.
+    ///
+    /// Never sent, never logged, never shown. It describes this machine's
+    /// disk, which the server has no business knowing.
+    pub file_id: Option<String>,
 }
 
 /// A protected root as this machine knows it.
@@ -323,6 +337,8 @@ impl SyncStore {
                 intent               TEXT NOT NULL DEFAULT 'UPSERT',
                 -- Where the server currently has it; NULL until first sent.
                 synced_path          TEXT,
+                -- This file's identity on its volume. Local only, never sent.
+                file_id              TEXT,
                 updated_at           TEXT NOT NULL,
                 PRIMARY KEY (server_id, client_entry_id)
             );
@@ -368,6 +384,15 @@ impl SyncStore {
         // Anything else has genuinely never been sent.
         add_column("entries", "synced_path", "synced_path TEXT")?;
         add_column("roots", "status", "status TEXT NOT NULL DEFAULT 'ACTIVE'")?;
+        add_column("entries", "file_id", "file_id TEXT")?;
+
+        // Finding the entry that used to be at a path is the whole point, and
+        // it happens on every arrival the watcher reports.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS entries_file_id
+                 ON entries (server_id, root_id, file_id);",
+        )
+        .map_err(map_write)?;
 
         // Entries already synced by an earlier version are, by definition, at
         // the path the server has. Without this every one of them would look
@@ -624,8 +649,8 @@ impl SyncStore {
             "INSERT INTO entries (
                 client_entry_id, server_id, root_id, relative_path, path_key,
                 entry_type, size_bytes, modified_ms, state, pending_operation_id,
-                intent, synced_path, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                intent, synced_path, file_id, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(server_id, client_entry_id) DO UPDATE SET
                 root_id              = excluded.root_id,
                 relative_path        = excluded.relative_path,
@@ -637,6 +662,7 @@ impl SyncStore {
                 pending_operation_id = excluded.pending_operation_id,
                 intent               = excluded.intent,
                 synced_path          = excluded.synced_path,
+                file_id              = excluded.file_id,
                 updated_at           = excluded.updated_at",
             params![
                 entry.client_entry_id,
@@ -651,6 +677,7 @@ impl SyncStore {
                 entry.pending_operation_id,
                 entry.intent.as_str(),
                 entry.synced_path,
+                entry.file_id,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
@@ -959,6 +986,37 @@ impl SyncStore {
         Ok(true)
     }
 
+    /// The entry Windows says is this same file, wherever we last saw it.
+    ///
+    /// The lookup that makes a move a move. When something appears at a new
+    /// path, this answers "is this a file we already have, somewhere else?"
+    /// exactly, rather than guessing from its name and size.
+    ///
+    /// Tombstoned entries are excluded: the server has already been told that
+    /// one is gone, and resurrecting it would be a second story about the same
+    /// file. A new arrival that reuses a dead file's index is simply new.
+    pub fn entry_by_file_id(
+        &self,
+        server_id: &str,
+        root_id: &str,
+        file_id: &str,
+    ) -> Result<Option<Entry>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {ENTRY_COLUMNS}
+                 FROM entries
+                 WHERE server_id = ?1 AND root_id = ?2 AND file_id = ?3
+                   AND state != 'TOMBSTONED'
+                 LIMIT 1"
+            ),
+            params![server_id, root_id, file_id],
+            read_entry,
+        )
+        .optional()
+        .map_err(map_read)
+    }
+
     /// Record that an entry is the same entry, at a new path.
     ///
     /// Only a move when the server already has it somewhere else. An entry it
@@ -1171,8 +1229,8 @@ impl SyncStore {
                 "INSERT INTO entries (
                     client_entry_id, server_id, root_id, relative_path, path_key,
                     entry_type, size_bytes, modified_ms, state, pending_operation_id,
-                    intent, synced_path, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    intent, synced_path, file_id, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(server_id, client_entry_id) DO UPDATE SET
                     root_id              = excluded.root_id,
                     relative_path        = excluded.relative_path,
@@ -1184,6 +1242,7 @@ impl SyncStore {
                     pending_operation_id = excluded.pending_operation_id,
                     intent               = excluded.intent,
                     synced_path          = excluded.synced_path,
+                    file_id              = excluded.file_id,
                     updated_at           = excluded.updated_at",
                 params![
                     entry.client_entry_id,
@@ -1198,6 +1257,7 @@ impl SyncStore {
                     entry.pending_operation_id,
                     entry.intent.as_str(),
                     entry.synced_path,
+                    entry.file_id,
                     now,
                 ],
             )
@@ -1236,7 +1296,7 @@ impl SyncStore {
 
 /// The column list every entry query selects, in the order `read_entry` wants.
 const ENTRY_COLUMNS: &str = "client_entry_id, root_id, relative_path, entry_type, size_bytes, \
-     modified_ms, state, pending_operation_id, intent, synced_path";
+     modified_ms, state, pending_operation_id, intent, synced_path, file_id";
 
 fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
@@ -1250,6 +1310,7 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         pending_operation_id: row.get(7)?,
         intent: Intent::parse(&row.get::<_, String>(8)?),
         synced_path: row.get(9)?,
+        file_id: row.get(10)?,
     })
 }
 
@@ -1299,6 +1360,7 @@ mod tests {
             pending_operation_id: None,
             intent: Intent::Upsert,
             synced_path: None,
+            file_id: None,
         }
     }
 

@@ -924,3 +924,180 @@ fn confirming_a_hold_removes_nothing_if_the_files_came_back() {
     };
     assert_eq!(removed, 0, "nothing is missing, so nothing may be removed");
 }
+
+// --- The three move cases, named ------------------------------------------
+//
+// They are three different problems and the report must not blur them.
+//
+//   A  same folder, same parent            Root\a.txt   -> Root\b.txt
+//   B  same folder, different directory    Root\a.txt   -> Root\Archive\a.txt
+//   C  two different protected folders     One\a.txt    -> Two\a.txt
+//
+// A and B keep the entry's identity and cost one small request. C cannot:
+// each protected folder is its own root on the server with its own opaque
+// identity, and one entry cannot belong to two of them.
+
+#[test]
+fn case_a_same_parent_rename_is_a_move() {
+    let f = Fixture::new();
+    f.write("a.txt", b"some contents worth not re-sending");
+    f.touched("a.txt");
+    f.mark_all_synced();
+    let identity = f.entry("a.txt").unwrap().client_entry_id;
+
+    std::fs::rename(f.path("a.txt"), f.path("b.txt")).unwrap();
+    f.renamed("a.txt", "b.txt");
+
+    let moved = f.entry("b.txt").expect("at the new path");
+    assert_eq!(moved.intent, Intent::Move);
+    assert_eq!(moved.client_entry_id, identity);
+    assert!(f.entry("a.txt").is_none());
+}
+
+#[test]
+fn case_b_cross_directory_move_is_a_move_not_a_re_upload() {
+    // Windows does not always report this as a rename pair, so it arrives as
+    // an unrelated disappearance and arrival. Correlating them by the file's
+    // own identity is what keeps it one small request instead of re-sending
+    // every byte.
+    let f = Fixture::new();
+    f.write("a.txt", b"some contents worth not re-sending");
+    f.mkdir("Archive");
+    f.touched("Archive");
+    f.touched("a.txt");
+    f.mark_all_synced();
+    let identity = f.entry("a.txt").unwrap().client_entry_id;
+
+    std::fs::rename(f.path("a.txt"), f.path("Archive/a.txt")).unwrap();
+    // Deliberately *not* a Renamed: the unpaired case, which is the hard one.
+    f.gone("a.txt");
+    f.touched("Archive/a.txt");
+
+    let moved = f.entry("Archive/a.txt").expect("at the new path");
+    assert_eq!(
+        moved.intent,
+        Intent::Move,
+        "a cross-directory move must not re-upload the bytes"
+    );
+    assert_eq!(moved.client_entry_id, identity, "identity must survive");
+}
+
+#[test]
+fn case_b_survives_the_arrival_being_seen_first() {
+    // Event order is not guaranteed. The arrival may be handled before the
+    // disappearance, and the answer must be the same.
+    let f = Fixture::new();
+    f.write("a.txt", b"contents");
+    f.mkdir("Archive");
+    f.touched("Archive");
+    f.touched("a.txt");
+    f.mark_all_synced();
+    let identity = f.entry("a.txt").unwrap().client_entry_id;
+
+    std::fs::rename(f.path("a.txt"), f.path("Archive/a.txt")).unwrap();
+    f.touched("Archive/a.txt");
+    f.gone("a.txt");
+
+    let moved = f.entry("Archive/a.txt").expect("at the new path");
+    assert_eq!(moved.client_entry_id, identity);
+    assert!(f.entry("a.txt").is_none());
+}
+
+#[test]
+fn case_b_directory_move_carries_the_subtree_without_re_uploading() {
+    let f = Fixture::new();
+    f.write("old/deep/b.txt", b"contents");
+    f.mkdir("Archive");
+    f.touched("Archive");
+    f.touched("old/deep/b.txt");
+    f.mark_all_synced();
+    let identity = f.entry("old/deep/b.txt").unwrap().client_entry_id;
+
+    std::fs::rename(f.path("old"), f.path("Archive/old")).unwrap();
+    f.gone("old");
+    f.touched("Archive/old");
+
+    let moved = f
+        .entry("Archive/old/deep/b.txt")
+        .expect("the file should have travelled with its folder");
+    assert_eq!(moved.intent, Intent::Move);
+    assert_eq!(moved.client_entry_id, identity);
+}
+
+#[test]
+fn case_b_is_found_by_reconciliation_when_no_events_arrived() {
+    // The app was closed. No events at all; the scan simply finds one path
+    // gone and another present, and identity is the only safe way to tell it
+    // is the same file.
+    let f = Fixture::new();
+    f.write("a.txt", b"contents");
+    f.mkdir("Archive");
+    f.touched("Archive");
+    f.touched("a.txt");
+    f.mark_all_synced();
+    let identity = f.entry("a.txt").unwrap().client_entry_id;
+
+    std::fs::rename(f.path("a.txt"), f.path("Archive/a.txt")).unwrap();
+
+    let outcome = f.reconcile();
+    let Outcome::Reconciled { moved, removed, .. } = outcome else {
+        panic!("expected a reconciliation, got {outcome:?}");
+    };
+    assert_eq!(moved, 1);
+    assert_eq!(removed, 0, "a move is not a deletion");
+    assert_eq!(f.entry("Archive/a.txt").unwrap().client_entry_id, identity);
+}
+
+#[test]
+fn identical_files_are_never_mistaken_for_each_other() {
+    // The reason identity is asked of Windows rather than guessed. These two
+    // agree on name, size and content; a heuristic would pair the wrong ones
+    // and tell the server to move one file on top of the other.
+    let f = Fixture::new();
+    f.write("one/render.png", b"identical bytes");
+    f.write("two/render.png", b"identical bytes");
+    f.touched("one/render.png");
+    f.touched("two/render.png");
+    f.mark_all_synced();
+    let one = f.entry("one/render.png").unwrap().client_entry_id;
+    let two = f.entry("two/render.png").unwrap().client_entry_id;
+    assert_ne!(one, two);
+
+    // Move only the first.
+    f.mkdir("Archive");
+    std::fs::rename(f.path("one/render.png"), f.path("Archive/render.png")).unwrap();
+    f.gone("one/render.png");
+    f.touched("Archive/render.png");
+
+    assert_eq!(
+        f.entry("Archive/render.png").unwrap().client_entry_id,
+        one,
+        "the file that actually moved must be the one that moved"
+    );
+    assert_eq!(
+        f.entry("two/render.png").unwrap().client_entry_id,
+        two,
+        "the other must be left entirely alone"
+    );
+    assert_eq!(f.entry("two/render.png").unwrap().state, SyncState::Synced);
+}
+
+#[test]
+fn a_new_file_reusing_an_old_path_is_not_treated_as_a_move() {
+    // Delete and recreate at the same path. The new file has its own identity,
+    // so it is new content — not the old file having moved somewhere.
+    let f = Fixture::new();
+    f.write("a.txt", b"first");
+    f.touched("a.txt");
+    f.mark_all_synced();
+    let first = f.entry("a.txt").unwrap().client_entry_id;
+
+    std::fs::remove_file(f.path("a.txt")).unwrap();
+    f.gone("a.txt");
+    f.write("a.txt", b"second, different");
+    f.touched("a.txt");
+
+    let entry = f.entry("a.txt").unwrap();
+    assert_eq!(entry.intent, Intent::Upsert);
+    let _ = first;
+}

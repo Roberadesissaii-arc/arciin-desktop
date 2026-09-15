@@ -200,28 +200,50 @@ fn reconcile_root_inner(
         })
         .collect();
 
-    // Disappearances that look like a rename: something arrived that the
-    // database does not know about, with the same size and modification time
-    // as something that left. Matching them keeps the entry's identity, so the
-    // server is told to move a file rather than to lose one and gain another.
+    // Disappearances that are really moves.
+    //
+    // Matched on the file's own identity, which Windows guarantees is unique
+    // on the volume and unchanged by a move. The obvious alternative — same
+    // name, same size, same modification time — is unsafe rather than merely
+    // imprecise: a folder of exported images or build output is full of files
+    // agreeing on all three, and matching the wrong pair tells the server to
+    // move one file on top of another. The file that loses is gone.
+    //
+    // Only files that arrived unrecognised are candidates, and each identity
+    // is claimed once.
     let mut moves: Vec<(&Entry, String)> = Vec::new();
     let mut claimed: Vec<String> = Vec::new();
+
+    let mut arrivals: HashMap<String, &str> = HashMap::new();
+    for file in &scanned.files {
+        let key = crate::backup::protocol::path_identity_key(&file.relative_path);
+        if known_by_key.contains_key(&key) {
+            continue;
+        }
+        if let Some(id) = crate::backup::identity::identify(
+            &root.local_path.join(file.relative_path.replace('/', "\\")),
+        ) {
+            arrivals.insert(id, &file.relative_path);
+        }
+    }
+
     for gone in &missing {
         if gone.entry_type != EntryType::File || gone.synced_path.is_none() {
             continue;
         }
-        let candidate = scanned.files.iter().find(|file| {
-            let key = crate::backup::protocol::path_identity_key(&file.relative_path);
-            file.size_bytes as i64 == gone.size_bytes
-                && file.modified_ms == gone.modified_ms
-                && !known_by_key.contains_key(&key)
-                && !claimed.contains(&key)
-        });
-        if let Some(file) = candidate {
-            claimed.push(crate::backup::protocol::path_identity_key(
-                &file.relative_path,
-            ));
-            moves.push((gone, file.relative_path.clone()));
+        let Some(file_id) = gone.file_id.as_deref() else {
+            // Recorded before identities were kept, or on a filesystem that
+            // supplies none. Not guessed at — it is treated as a deletion and
+            // an unrelated arrival, which is correct, only less efficient.
+            continue;
+        };
+        if let Some(landed) = arrivals.get(file_id) {
+            let key = crate::backup::protocol::path_identity_key(landed);
+            if claimed.contains(&key) {
+                continue;
+            }
+            claimed.push(key);
+            moves.push((gone, (*landed).to_string()));
         }
     }
 
@@ -266,14 +288,24 @@ fn reconcile_root_inner(
             return;
         }
         match known_by_key.get(&key) {
+            // Nothing to say about this one.
+            //
+            // Two ways that can be true, and both matter. Either the server
+            // already has exactly this content, or it is already queued to
+            // receive exactly this content — and re-queueing work that is
+            // already queued is not free: during the initial backup of a large
+            // folder every entry is pending, so a pass that rewrote them all
+            // would rewrite ten thousand rows every ten minutes to change
+            // nothing.
+            //
+            // `FAILED` is deliberately absent: a failure is worth retrying,
+            // and this is the pass that retries it.
             Some(entry)
-                if entry.state == SyncState::Synced
-                    && entry.size_bytes == size
-                    && entry.modified_ms == modified =>
-            {
-                // The server has this exact content. Re-sending it would cost
-                // the user bandwidth to tell Arciin something it already knows.
-            }
+                if entry.size_bytes == size
+                    && entry.modified_ms == modified
+                    && (entry.state == SyncState::Synced
+                        || (entry.state == SyncState::Pending
+                            && entry.intent == Intent::Upsert)) => {}
             Some(entry) => {
                 updated += 1;
                 batch.push(Entry {
@@ -287,6 +319,9 @@ fn reconcile_root_inner(
                     pending_operation_id: entry.pending_operation_id.clone(),
                     intent: Intent::Upsert,
                     synced_path: entry.synced_path.clone(),
+                    file_id: crate::backup::identity::identify(
+                        &root.local_path.join(relative_path.replace('/', "\\")),
+                    ),
                 });
             }
             None => {
@@ -302,6 +337,9 @@ fn reconcile_root_inner(
                     pending_operation_id: None,
                     intent: Intent::Upsert,
                     synced_path: None,
+                    file_id: crate::backup::identity::identify(
+                        &root.local_path.join(relative_path.replace('/', "\\")),
+                    ),
                 });
             }
         }
@@ -510,7 +548,38 @@ fn touched(
         return Ok(());
     }
 
+    // Windows' own answer to "is this a file we already have?".
+    let file_id = crate::backup::identity::identify(&path);
+
     let existing = store.entry_by_path(server_id, &root.id, relative)?;
+
+    // Nothing recorded at this path, but this exact file is recorded at
+    // another one — so it moved, and the server should be told to move it
+    // rather than sent the bytes again.
+    //
+    // This is what covers a move across directories, which Windows does not
+    // always report as a rename pair, and a move discovered after the fact
+    // because the app was closed when it happened.
+    if existing.is_none() {
+        if let Some(file_id) = file_id.as_deref() {
+            if let Some(elsewhere) = store.entry_by_file_id(server_id, &root.id, file_id)? {
+                let gone_from_there = !absolute(root, &elsewhere.relative_path).exists();
+                if gone_from_there && elsewhere.relative_path != relative {
+                    if elsewhere.entry_type == EntryType::Folder {
+                        store.queue_subtree_move(
+                            server_id,
+                            &root.id,
+                            &elsewhere.relative_path,
+                            relative,
+                        )?;
+                    } else {
+                        store.queue_move(server_id, &elsewhere.client_entry_id, relative)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
 
     let (entry_type, size, modified) = if metadata.is_dir() {
         (EntryType::Folder, 0, 0)
@@ -551,6 +620,7 @@ fn touched(
             .and_then(|e| e.pending_operation_id.clone()),
         intent: Intent::Upsert,
         synced_path: existing.and_then(|e| e.synced_path),
+        file_id,
     };
 
     // Ancestors first, and in the same write. A file whose parent folder has
@@ -585,6 +655,7 @@ fn ancestor_entries(
         if !absolute(root, &ancestor).is_dir() {
             continue;
         }
+        let ancestor_path = ancestor.clone();
         out.push(Entry {
             client_entry_id: uuid::Uuid::new_v4().to_string(),
             root_id: root.id.clone(),
@@ -596,6 +667,7 @@ fn ancestor_entries(
             pending_operation_id: None,
             intent: Intent::Upsert,
             synced_path: None,
+            file_id: crate::backup::identity::identify(&absolute(root, &ancestor_path)),
         });
     }
     Ok(out)

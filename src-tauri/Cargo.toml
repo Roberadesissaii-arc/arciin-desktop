@@ -67,9 +67,12 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_Shell",
     "Win32_System_Com",
     "Win32_Storage_FileSystem",
+    # CreateFileW, for reading a file's identity without opening it for I/O.
+    "Win32_Security",
 ] }
 
 [dev-dependencies]
+filetime = "0.2.29"
 tempfile = "3"
 # The live lifecycle certification test drives async client calls directly.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -17,6 +17,7 @@
 pub mod client;
 pub mod engine;
 pub mod folder_picker;
+pub mod identity;
 pub mod known_folders;
 pub mod manager;
 pub mod ordering;
