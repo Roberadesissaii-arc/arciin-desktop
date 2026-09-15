@@ -73,6 +73,7 @@ windows = { version = "0.61.3", features = [
 
 [dev-dependencies]
 filetime = "0.2.29"
+rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
 # The live lifecycle certification test drives async client calls directly.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

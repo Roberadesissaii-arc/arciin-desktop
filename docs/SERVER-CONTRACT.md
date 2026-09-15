@@ -30,7 +30,7 @@ The client-side copy of these constants is `src-tauri/src/protocol.rs`.
 ## Endpoints this client uses
 
 All four are reached on the **web origin** (for example
-`http://192.168.1.50:3002`), which proxies `/api/*` to the Fastify API and
+`http://203.0.113.10:3002`), which proxies `/api/*` to the Fastify API and
 serves `/.well-known/arciin` from it. The web origin is the right base because
 it is also what the WebView loads, so the trusted-device cookie lands on the
 same origin as the application.
@@ -141,8 +141,8 @@ not returned in V1.
   nothing on a standard install, and the manual address path is the primary
   route. The client treats this as normal, not as an error.
 - **`webUrl` in the manifest can be stale or unreachable.** The live server
-  reports `webUrl: http://192.168.1.51:3002` while actually serving on
-  `192.168.1.50:3002`. The client therefore connects to the origin it
+  reports `webUrl: http://203.0.113.11:3002` while actually serving on
+  `203.0.113.10:3002`. The client therefore connects to the origin it
   successfully fetched the manifest from and uses `webUrl` for nothing.
 
 ## What the watcher sends

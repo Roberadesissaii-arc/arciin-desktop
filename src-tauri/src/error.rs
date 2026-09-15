@@ -162,6 +162,14 @@ pub fn friendly(code: &str) -> (&'static str, bool) {
             "Sign in to Arciin on this computer to manage backup.",
             false,
         ),
+        "UPLOAD_TOO_LARGE" => (
+            "That file is larger than your Arciin server accepts. Everything else keeps backing up.",
+            false,
+        ),
+        "BACKUP_ENTRY_NOT_FOUND" => (
+            "Arciin no longer has that item. It will be sent again on the next check.",
+            false,
+        ),
         "BACKUP_FILE_UNREADABLE" => (
             "Windows wouldn't let Arciin read that file. It will be tried again later.",
             true,
@@ -171,7 +179,15 @@ pub fn friendly(code: &str) -> (&'static str, bool) {
             true,
         ),
 
-        _ => ("Something went wrong connecting to Arciin.", true),
+        // The backup protocol's own vocabulary, which lives with the protocol.
+        //
+        // Consulted here so there is one answer per code whatever asked. A
+        // response from the server used to reach that table while the same
+        // code raised locally reached this generic line — so the identical
+        // situation read two different ways depending on who noticed it, and
+        // the generic version was also wrongly marked retryable.
+        _ => crate::backup::protocol::friendly_backup_error(code)
+            .unwrap_or(("Something went wrong connecting to Arciin.", true)),
     }
 }
 

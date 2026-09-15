@@ -1101,3 +1101,70 @@ fn a_new_file_reusing_an_old_path_is_not_treated_as_a_move() {
     assert_eq!(entry.intent, Intent::Upsert);
     let _ = first;
 }
+
+#[test]
+fn an_upgraded_backup_learns_file_identities_without_re_uploading() {
+    // Found while certifying an upgrade: entries written by a version that had
+    // no concept of file identity keep none, and an unchanged file is exactly
+    // the one that never acquires one. Moving it would then re-upload it.
+    //
+    // Learning must not look like work: the entry stays synced and nothing is
+    // queued by the act of learning.
+    let f = Fixture::new();
+    f.write("legacy.txt", b"written by an older version");
+    f.touched("legacy.txt");
+    f.mark_all_synced();
+
+    // Strip the identity, as an upgraded database would have it.
+    let mut legacy = f.entry("legacy.txt").unwrap();
+    legacy.file_id = None;
+    f.store.apply_batch(SERVER, &[legacy.clone()]).unwrap();
+    assert!(f.entry("legacy.txt").unwrap().file_id.is_none());
+
+    let outcome = f.reconcile();
+    let Outcome::Reconciled {
+        created,
+        updated,
+        removed,
+        ..
+    } = outcome
+    else {
+        panic!("expected a reconciliation, got {outcome:?}");
+    };
+    assert_eq!(
+        (created, updated, removed),
+        (0, 0, 0),
+        "no work may be queued"
+    );
+    assert!(f.outstanding_paths().is_empty(), "nothing queued to send");
+
+    let learned = f.entry("legacy.txt").unwrap();
+    assert!(learned.file_id.is_some(), "the identity should be learned");
+    assert_eq!(learned.state, SyncState::Synced, "and it stays synced");
+    assert_eq!(learned.client_entry_id, legacy.client_entry_id);
+}
+
+#[test]
+fn an_upgraded_entry_can_then_be_moved_rather_than_re_uploaded() {
+    // The payoff: once learned, a move is a move.
+    let f = Fixture::new();
+    f.write("legacy.txt", b"written by an older version");
+    f.mkdir("Archive");
+    f.touched("Archive");
+    f.touched("legacy.txt");
+    f.mark_all_synced();
+
+    let mut legacy = f.entry("legacy.txt").unwrap();
+    let identity = legacy.client_entry_id.clone();
+    legacy.file_id = None;
+    f.store.apply_batch(SERVER, &[legacy]).unwrap();
+
+    f.reconcile(); // learns the identity
+    std::fs::rename(f.path("legacy.txt"), f.path("Archive/legacy.txt")).unwrap();
+    f.gone("legacy.txt");
+    f.touched("Archive/legacy.txt");
+
+    let moved = f.entry("Archive/legacy.txt").expect("at the new path");
+    assert_eq!(moved.intent, Intent::Move, "should move, not re-upload");
+    assert_eq!(moved.client_entry_id, identity);
+}

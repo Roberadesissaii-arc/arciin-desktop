@@ -386,4 +386,53 @@ mod sync_tests {
         assert_ne!(SERVICE_PREFIX, SYNC_SERVICE_PREFIX);
         assert!(!SYNC_SERVICE_PREFIX.starts_with(SERVICE_PREFIX));
     }
+
+    // --- Identity, not address -------------------------------------------
+    //
+    // Home networks move: a router reboots, a lease changes, a machine swaps
+    // Wi-Fi for Ethernet. The server is the same server, and a client that
+    // re-keyed its secrets by address would ask its owner to pair again every
+    // time — leaving another trusted device on the server each time it did.
+
+    #[test]
+    fn a_server_that_moved_keeps_its_device_credential() {
+        // Nothing here mentions an address, which is the point: there is
+        // nowhere for one to get in.
+        let credentials = MemoryCredentialStore::new();
+        credentials
+            .save(SERVER_A, "device-credential-value")
+            .unwrap();
+        assert_eq!(
+            credentials.load(SERVER_A).unwrap().as_deref(),
+            Some("device-credential-value"),
+            "the pairing must survive the server moving"
+        );
+    }
+
+    #[test]
+    fn a_server_that_moved_keeps_its_backup_grant() {
+        let credentials = MemoryCredentialStore::new();
+        credentials
+            .save_sync(SERVER_A, "profile-1", "arcsync_example_for_this_test")
+            .unwrap();
+        assert!(
+            credentials
+                .load_sync(SERVER_A, "profile-1")
+                .unwrap()
+                .is_some(),
+            "backup must not need re-authorising because the router rebooted"
+        );
+    }
+
+    #[test]
+    fn one_servers_credential_never_answers_for_another() {
+        // The other half. Two instances must not be able to borrow each
+        // other's trust, however similar their addresses.
+        let credentials = MemoryCredentialStore::new();
+        credentials.save(SERVER_A, "a-credential").unwrap();
+        assert!(
+            credentials.load(SERVER_B).unwrap().is_none(),
+            "credentials are filed per identity, and must stay that way"
+        );
+    }
 }

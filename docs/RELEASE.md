@@ -46,11 +46,16 @@ pre-existing `target/` cache, no local secret files, no manually copied DLLs.
 The only host requirements are Rust, Node 20+, and the Windows SDK that
 `tauri-winres` uses for the resource compiler.
 
-> **Known wart.** Tauri derives the installer filename from `productName`, so
-> it currently contains a space: `Arciin Desktop_0.1.0_x64-setup.exe`. That is
-> awkward in a URL. Either rename the asset when publishing, or decide to
-> change `productName` — which also changes the installed application name, so
-> it is a product decision, not a build tweak.
+Tauri derives the installer filename from `productName`, so the bundler
+produces `Arciin Desktop_0.1.0_x64-setup.exe` — with a space, which becomes
+`%20` in a URL, breaks when pasted into a terminal, and is a recurring source
+of mangled paths in third-party install scripts.
+
+`release-metadata.mjs` renames it to `Arciin-Desktop-<version>-x64-Setup.exe`
+before recording it, and the workflow uploads whatever is in the bundle
+directory. The *product* name is untouched: Windows still shows
+"Arciin Desktop" in Apps & Features, the Start Menu and the installer's own
+title bar, which is what it should say.
 
 ## Workflows
 

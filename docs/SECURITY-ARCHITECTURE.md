@@ -50,8 +50,8 @@ therefore cannot put chosen text on screen.
 This is the check that protects a LAN where addresses get reassigned.
 
 ```txt
-yesterday   192.168.1.50  ->  serverId ABC   (paired, credential stored)
-today       192.168.1.50  ->  serverId XYZ   (a different machine)
+yesterday   203.0.113.10  ->  serverId ABC   (paired, credential stored)
+today       203.0.113.10  ->  serverId XYZ   (a different machine)
 ```
 
 Before a stored credential is **read**, the manifest is fetched again and its
