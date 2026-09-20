@@ -339,6 +339,21 @@ fn open_arciin_window(
                 ARCIIN_CONTENT_WEBVIEW,
                 WebviewUrl::External(origin.clone()),
             )
+            // Let dropped files reach the page.
+            //
+            // Tauri installs an OS-level drag-and-drop handler by default, and
+            // on Windows that handler swallows the drop before the webview
+            // sees it: the HTML5 `dragover`/`drop` events never fire. Arciin's
+            // own upload area is built on those events, so dragging a file
+            // onto the window did nothing at all — no upload, and no sign that
+            // anything had been dropped.
+            //
+            // Nothing here consumes Tauri's native drop events, so turning the
+            // handler off loses no behaviour. It is also the narrower of the
+            // two: the native handler hands the frontend real Windows paths,
+            // where HTML5 hands it file contents and a name, which is all the
+            // server's uploader needs.
+            .disable_drag_drop_handler()
             .on_navigation(move |url| guard_navigation(&handle, &allowed, url))
             .on_page_load(move |webview, payload| {
                 if payload.event() != tauri::webview::PageLoadEvent::Finished {
