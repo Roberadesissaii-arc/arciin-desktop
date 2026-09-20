@@ -197,6 +197,16 @@
       void appWindow.onResized(syncMaximized)
       void syncMaximized()
 
+      /*
+       * WebView2's own context menu has no business on the window controls.
+       * There is nothing here to cut, copy or paste, so unlike the shell this
+       * suppresses the menu without offering one in its place — the
+       * alternative is Save as and developer tools on a right-click of the
+       * title bar.
+       */
+      document.addEventListener("contextmenu", (event) => {
+        event.preventDefault()
+      })
     </script>
   </body>
 </html>

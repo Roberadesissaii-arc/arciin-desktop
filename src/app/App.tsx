@@ -14,6 +14,7 @@ import { useEffect, useState } from "react"
 import { KeyRound, Network, ShieldCheck } from "lucide-react"
 
 import { HeroWordmark, Wordmark } from "@/components/brand"
+import { ContextMenu } from "@/components/context-menu"
 import { FooterNoteSlot } from "@/components/footer-note"
 import { HeroConnection } from "@/components/hero-connection"
 import { Status } from "@/components/ui"
@@ -70,6 +71,9 @@ export function App() {
 
   return (
     <FooterNoteSlot.Provider value={noteSlot}>
+    {/* Mounted once, for every screen: it works off the document, not a
+        subtree, so a right-click anywhere in this shell is covered. */}
+    <ContextMenu />
     <div className="shell">
       <main className="shell__main">
         <Wordmark />
