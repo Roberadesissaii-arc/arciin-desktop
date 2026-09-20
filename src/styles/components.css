@@ -1086,3 +1086,60 @@ button.folder:hover:not(:disabled) {
 .listbox__list .folder {
   background: var(--surface);
 }
+
+/* --- Right-click menu -------------------------------------------------- */
+/*
+ * Fixed rather than absolute: it is positioned from the pointer, which is in
+ * viewport coordinates, and it must sit above every screen including the
+ * Backup Center's own scrolling list.
+ */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 184px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  /* Lifted off the page; a menu that reads as part of the panel underneath is
+     hard to dismiss with the eye. */
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.context-menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu__item:hover:not(:disabled) {
+  background: var(--surface-quiet);
+}
+
+.context-menu__item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.context-menu__shortcut {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.context-menu__item:disabled .context-menu__shortcut {
+  color: var(--text-faint);
+}
