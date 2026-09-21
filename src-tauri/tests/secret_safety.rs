@@ -1,9 +1,9 @@
-//! Where the backup credential is allowed to go, and where it is not.
+//! Where a credential is allowed to go, and where it is not.
 //!
-//! The rule is narrow enough to state in a sentence: the `ArciinSync`
+//! The rule is narrow enough to state in a sentence: the trusted-device
 //! credential goes from the server into Windows Credential Manager, and from
-//! there into one `Authorization` header. It reaches no log, no database, no
-//! URL, and no part of the UI.
+//! there into one `Authorization` header. It reaches no log, no URL, and no
+//! part of the UI.
 //!
 //! Stating it is easy; keeping it true across changes is not, because each of
 //! those leaks is one careless line away — a `tracing::info!` that interpolates
@@ -128,42 +128,15 @@ fn impl_block<'a>(source: &'a str, header: &str) -> &'a str {
 }
 
 #[test]
-fn the_sync_credential_is_attached_in_exactly_one_place() {
-    // Structural, not stylistic. One attachment point is what makes the claim
-    // "it only ever travels in an Authorization header" checkable at all; a
-    // second one is where a credential ends up in a query string or a log.
-    let client = std::fs::read_to_string(src_dir().join("backup").join("client.rs"))
-        .expect("client.rs must exist");
-
-    let body = impl_block(&client, "impl BackupClient {");
-    let uses: Vec<&str> = body
-        .lines()
-        .filter(|line| without_string_literals(line).contains("self.credential"))
-        .map(str::trim)
-        .collect();
-
-    assert_eq!(
-        uses.len(),
-        1,
-        "the client must read its credential in exactly one place, found: {uses:?}"
-    );
-    assert!(
-        uses[0].contains("SYNC_AUTH_SCHEME"),
-        "its one use must be building the Authorization header, not: {}",
-        uses[0]
-    );
-}
-
-#[test]
 fn the_issued_credential_leaves_its_carrier_exactly_once() {
-    // `EnableOutcome` is the only thing that ever holds a freshly issued
-    // credential in the client. It exists to be consumed once, at the point
-    // the secret is handed to Windows Credential Manager — so the field must
-    // have no accessor that could hand it anywhere else.
-    let client = std::fs::read_to_string(src_dir().join("backup").join("client.rs"))
-        .expect("client.rs must exist");
+    // `PairOutcome` is the only thing that ever holds a freshly issued
+    // credential. It exists to be consumed once, at the point the secret is
+    // handed to Windows Credential Manager — so the field must have no
+    // accessor that could hand it anywhere else.
+    let pairing = std::fs::read_to_string(src_dir().join("pairing").join("mod.rs"))
+        .expect("pairing/mod.rs must exist");
 
-    let body = impl_block(&client, "impl EnableOutcome {");
+    let body = impl_block(&pairing, "impl PairOutcome {");
     let uses: Vec<&str> = body
         .lines()
         .filter(|line| without_string_literals(line).contains("self.credential"))
@@ -186,135 +159,30 @@ fn no_url_is_ever_built_from_a_credential() {
     // The failure this guards: a credential in a path or query string. URLs are
     // written down everywhere — access logs, proxies, error reports — so one
     // there leaks into places nobody is guarding.
-    let client = std::fs::read_to_string(src_dir().join("backup").join("client.rs"))
-        .expect("client.rs must exist");
-
-    for (number, line) in client.lines().enumerate() {
-        let joins_a_url = line.contains(".join(") || line.contains("format!(\"/");
-        if joins_a_url {
-            assert!(
-                !line.to_lowercase().contains("credential"),
-                "backup/client.rs:{} builds a URL from a credential: {}",
-                number + 1,
-                line.trim()
-            );
+    //
+    // Every source, not one file: a URL can be built anywhere, and the module
+    // that used to be the only place this mattered has since been deleted.
+    let mut offences = Vec::new();
+    for (path, text) in rust_sources() {
+        for (number, line) in text.lines().enumerate() {
+            let joins_a_url = line.contains(".join(") || line.contains("format!(\"/");
+            if joins_a_url && line.to_lowercase().contains("credential") {
+                offences.push(format!(
+                    "{}:{} builds a URL from a credential: {}",
+                    path.display(),
+                    number + 1,
+                    line.trim()
+                ));
+            }
         }
     }
-}
-
-#[test]
-fn the_local_database_never_stores_a_credential() {
-    use arciin_desktop_lib::backup::store::{Profile, Root, SyncStore};
-
-    // A credential-shaped value, written nowhere on purpose. If the store ever
-    // grew a column for one, the obvious way to fill it would be from the
-    // profile — so a profile is what gets saved here.
-    const SENTINEL: &str = "arcsync_ThisMustNeverReachDisk0000000000000";
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = SyncStore::open(dir.path()).expect("store opens");
-    let server_id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-
-    store
-        .save_profile(&Profile {
-            server_id: server_id.into(),
-            profile_id: "profile-1".into(),
-            device_id: "device-1".into(),
-            user_id: "user-1".into(),
-            paused: false,
-            enabled: true,
-        })
-        .expect("profile saves");
-    store
-        .save_root(
-            server_id,
-            &Root {
-                id: "root-1".into(),
-                kind: "CUSTOM".into(),
-                display_name: "TestBackup".into(),
-                local_path: std::path::PathBuf::from(r"D:\Profiles\TestUser\TestBackup"),
-                enabled: true,
-                status: arciin_desktop_lib::backup::store::RootStatus::Active,
-            },
+    assert!(
+        offences.is_empty(),
+        "a credential must never reach a URL:
+{}",
+        offences.join(
+            "
+"
         )
-        .expect("root saves");
-    drop(store);
-
-    // Every byte the store wrote, WAL included — a value can sit in the
-    // write-ahead log long after it left the main file.
-    let mut bytes = Vec::new();
-    for entry in std::fs::read_dir(dir.path()).expect("state dir readable") {
-        let path = entry.expect("entry").path();
-        if path.is_file() {
-            bytes.extend(std::fs::read(&path).expect("state file readable"));
-        }
-    }
-    let text = String::from_utf8_lossy(&bytes);
-
-    assert!(!text.contains(SENTINEL), "the sentinel reached disk");
-    assert!(
-        !text.contains("arcsync_"),
-        "something credential-shaped reached the local database"
     );
-    assert!(
-        !text.to_lowercase().contains("credential"),
-        "the local database has a credential column; it must not"
-    );
-}
-
-#[test]
-fn what_the_renderer_receives_carries_no_credential() {
-    use arciin_desktop_lib::backup::engine::EngineStatus;
-    use arciin_desktop_lib::backup::manager::{BackupState, Lifecycle, ProtectedRootView};
-
-    // The guard that matters most, because this struct is the *only* backup
-    // data that crosses into JavaScript. A secret could only arrive there by
-    // being added here, so this asserts the shape rather than a value.
-    let state = BackupState {
-        enabled: true,
-        watching: true,
-        lifecycle: Lifecycle::Active,
-        activation: None,
-        last_backup_at: Some("2026-09-14T20:00:00Z".into()),
-        status: Some(EngineStatus {
-            health: "SYNCING".into(),
-            files_synced: 12,
-            files_outstanding: 3,
-            files_failed: 0,
-            bytes_synced: 1024,
-            bytes_outstanding: 2048,
-            paused: false,
-            last_error: None,
-        }),
-        roots: vec![ProtectedRootView {
-            id: "root-1".into(),
-            kind: "CUSTOM".into(),
-            display_name: "TestBackup".into(),
-            enabled: true,
-            local_path: r"D:\Profiles\TestUser\TestBackup".into(),
-            local_path_exists: true,
-            status: "ACTIVE".into(),
-            file_count: 12,
-            pending: 0,
-            failed: 0,
-            bytes_synced: 1024,
-        }],
-    };
-
-    let json = serde_json::to_string(&state).expect("state serialises");
-    let lowered = json.to_lowercase();
-    for banned in [
-        "arcsync",
-        "credential",
-        "secret",
-        "token",
-        "password",
-        "cookie",
-        "authorization",
-    ] {
-        assert!(
-            !lowered.contains(banned),
-            "the renderer's backup state mentions `{banned}`: {json}"
-        );
-    }
 }

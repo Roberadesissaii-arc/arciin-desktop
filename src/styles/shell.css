@@ -619,30 +619,3 @@
     display: none;
   }
 }
-
-/*
- * A screen that lays itself out to the window instead of being a centred form.
- *
- * The Backup Center is a settings surface: its heading, totals, protected
- * folders and buttons each have one place and must stay there. Letting the
- * page scroll moved all of them at once — scrolling to reach a folder pushed
- * the buttons off, which is the opposite of what a settings window should do.
- *
- * So the page does not scroll at all here. The screen fills the window and
- * scrolls exactly one list inside itself.
- */
-.shell__body--fill {
-  overflow: hidden;
-  justify-content: stretch;
-  align-items: stretch;
-  padding: 8px 0 0;
-}
-
-.shell__content--fill {
-  max-width: 660px;
-  margin: 0 auto;
-  height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}

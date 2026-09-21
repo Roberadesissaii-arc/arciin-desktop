@@ -6,12 +6,12 @@
  * quietly failing every request, which reads as a broken product rather than
  * the thing they just asked for.
  *
- * The copy is deliberate about what did *not* happen: nothing on this PC was
- * deleted. That is the first question anyone asks after disconnecting a backup
- * client, and answering it before they ask is the whole job of this screen.
+ * The copy is deliberate about what did *not* happen: nothing was removed
+ * from the server. That is the first question anyone asks when a device stops
+ * being trusted, and answering it before they ask is the whole job here.
  */
 
-import { PlugZap, ServerCog, ShieldCheck } from "lucide-react"
+import { PlugZap, ShieldCheck } from "lucide-react"
 
 import { Button, LinkButton } from "@/components/ui"
 import { useOnboarding } from "@/stores/onboarding"
@@ -41,15 +41,9 @@ export function DisconnectedScreen() {
         <p className="disconnect__point">
           <ShieldCheck size={14} aria-hidden />
           <span>
-            <strong>Nothing on this PC was deleted.</strong> Your Desktop,
-            Documents, Pictures, Videos and Music are exactly as they were.
-          </span>
-        </p>
-        <p className="disconnect__point">
-          <ServerCog size={14} aria-hidden />
-          <span>
-            Files already backed up are still on your Arciin server. This
-            computer just can&rsquo;t reach them until it&rsquo;s paired again.
+            <strong>Nothing was removed from your server.</strong> Your files
+            are exactly as they were — this computer just can&rsquo;t reach
+            them until it&rsquo;s paired again.
           </span>
         </p>
       </div>

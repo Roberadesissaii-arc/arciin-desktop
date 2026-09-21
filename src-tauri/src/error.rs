@@ -125,69 +125,12 @@ pub fn friendly(code: &str) -> (&'static str, bool) {
         ),
         "CREDENTIAL_STORE_ERROR" => ("Windows Credential Manager couldn't be reached.", true),
         "SERVER_NOT_SAVED" => ("That server isn't saved on this computer.", false),
-        "BACKUP_FOLDER_UNAVAILABLE" => ("That folder isn't available on this computer.", false),
-        "BACKUP_NO_FOLDERS" => ("Choose at least one folder to protect.", false),
-        "BACKUP_ALREADY_STARTING" => ("Backup is already being set up on this computer.", false),
-        // --- Backup lifecycle (server-authoritative) ---
-        //
-        // Each of these is a different situation with a different way out, and
-        // collapsing them into "something went wrong" is how someone ends up
-        // re-pairing a computer when all they needed was to turn backup back
-        // on. In particular: backup being off is not the device being revoked.
-        "BACKUP_DISABLED" => (
-            "Computer Backup is turned off for this computer. Turn it back on to continue.",
-            false,
-        ),
-        "SYNC_ROOT_DISABLED" => (
-            "That folder is no longer being backed up. Add it again to resume.",
-            false,
-        ),
-        "BACKUP_READ_ONLY" => (
-            "Your Arciin server isn't accepting uploads right now.",
-            true,
-        ),
-        "BACKUP_FORBIDDEN" => (
-            "This account isn't allowed to manage backup for this computer.",
-            false,
-        ),
-        "BACKUP_NOT_FOUND" => (
-            "This computer has no backup set up on that Arciin server.",
-            false,
-        ),
-        "BACKUP_ROOT_NOT_FOUND" => (
-            "That protected folder no longer exists on your Arciin server.",
-            false,
-        ),
-        "BACKUP_UNAUTHORIZED" => (
-            "Sign in to Arciin on this computer to manage backup.",
-            false,
-        ),
-        "UPLOAD_TOO_LARGE" => (
-            "That file is larger than your Arciin server accepts. Everything else keeps backing up.",
-            false,
-        ),
-        "BACKUP_ENTRY_NOT_FOUND" => (
-            "Arciin no longer has that item. It will be sent again on the next check.",
-            false,
-        ),
-        "BACKUP_FILE_UNREADABLE" => (
-            "Windows wouldn't let Arciin read that file. It will be tried again later.",
-            true,
-        ),
         "WEBVIEW_BRIDGE_UNAVAILABLE" => (
             "Arciin Desktop couldn't hand the secure session to the app window.",
             true,
         ),
 
-        // The backup protocol's own vocabulary, which lives with the protocol.
-        //
-        // Consulted here so there is one answer per code whatever asked. A
-        // response from the server used to reach that table while the same
-        // code raised locally reached this generic line — so the identical
-        // situation read two different ways depending on who noticed it, and
-        // the generic version was also wrongly marked retryable.
-        _ => crate::backup::protocol::friendly_backup_error(code)
-            .unwrap_or(("Something went wrong connecting to Arciin.", true)),
+        _ => ("Something went wrong connecting to Arciin.", true),
     }
 }
 

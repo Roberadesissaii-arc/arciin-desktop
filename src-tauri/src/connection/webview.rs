@@ -369,14 +369,14 @@ fn read_cookie(
 
 /// A user session token, borrowed from the WebView for one authorized call.
 ///
-/// Authorizing computer backup needs a signed-in *user*, not just a trusted
-/// device — and that session only ever exists in the WebView's cookie jar,
-/// because that is where the person actually signed in. Rust therefore borrows
-/// it for exactly one request.
+/// Asking the server which device a signed-in session is bound to needs the
+/// *user* session, not just a trusted device — and that session only ever
+/// exists in the WebView's cookie jar, because that is where the person
+/// actually signed in. Rust therefore borrows it for exactly one request.
 ///
 /// The rules this type exists to enforce:
 ///
-/// - it is never written to disk, the sync database, or a log line;
+/// - it is never written to disk or a log line;
 /// - it is never handed to React;
 /// - it is read at the moment it is needed and dropped immediately after.
 ///
@@ -495,78 +495,4 @@ pub fn clear_user_session(window: &tauri::WebviewWindow, origin: &Url) -> Result
         "cleared a web session that could not be device-bound"
     );
     Ok(())
-}
-
-// --- Refreshing the server's page after a native change ----------------------
-
-/// Reload the Arciin page, but only if it is showing `path`.
-///
-/// # Why this exists
-///
-/// Turning backup on happens entirely in the native window. The server's My
-/// Computers page has no idea it happened, so it kept showing "No protected
-/// computers yet" with four zeroes until the person pressed F5 — right after
-/// being told their backup had started.
-///
-/// # Why it is narrow
-///
-/// A blanket reload would be rude: it would throw away whatever the person was
-/// doing on some unrelated page. So the current document's own URL is read
-/// first and the reload happens only when they are looking at the page that is
-/// now wrong. Anyone elsewhere is left alone and simply sees current data the
-/// next time they visit.
-///
-/// `ICoreWebView2::Reload` is WebView2's own API — no script is injected into
-/// the server's origin, which this client never does.
-///
-/// Returns whether a reload actually happened.
-#[cfg(windows)]
-pub fn reload_if_showing(webview: &tauri::Webview, path: &str) -> Result<bool, AppError> {
-    let path = path.to_string();
-    let (tx, rx) = mpsc::channel();
-
-    webview
-        .with_webview(move |platform| {
-            // SAFETY: runs on the UI thread that owns the controller; the one
-            // returned string is freed with the allocator WebView2 documents.
-            let result = unsafe {
-                platform
-                    .controller()
-                    .CoreWebView2()
-                    .map_err(|_| from_code("WEBVIEW_BRIDGE_UNAVAILABLE"))
-                    .and_then(|core| {
-                        let mut raw = windows::core::PWSTR::null();
-                        core.Source(&mut raw)
-                            .map_err(|_| from_code("WEBVIEW_BRIDGE_UNAVAILABLE"))?;
-                        let source = raw.to_string().unwrap_or_default();
-                        windows::Win32::System::Com::CoTaskMemFree(Some(raw.0 as *const _));
-
-                        let showing = Url::parse(&source)
-                            .map(|url| url.path() == path)
-                            .unwrap_or(false);
-                        if !showing {
-                            return Ok(false);
-                        }
-
-                        core.Reload()
-                            .map_err(|_| from_code("WEBVIEW_BRIDGE_UNAVAILABLE"))?;
-                        Ok(true)
-                    })
-            };
-            let _ = tx.send(result);
-        })
-        .map_err(|err| {
-            tracing::error!(error = %err, "could not reach the arciin webview to refresh it");
-            from_code("WEBVIEW_BRIDGE_UNAVAILABLE")
-        })?;
-
-    match rx.recv_timeout(BRIDGE_TIMEOUT) {
-        Ok(result) => result,
-        Err(_) => Err(from_code("WEBVIEW_BRIDGE_UNAVAILABLE")),
-    }
-}
-
-#[cfg(not(windows))]
-pub fn reload_if_showing(_webview: &tauri::Webview, _path: &str) -> Result<bool, AppError> {
-    Ok(false)
 }

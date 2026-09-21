@@ -21,13 +21,11 @@
 //!
 //! # What a disconnect must and must not do
 //!
-//! Must: stop the backup engine, drop *this* server's device credential and
-//! *this* profile's sync credential, clear this server's local backup state,
-//! and put the user back on a screen that explains itself.
+//! Must: drop *this* server's device credential and put the user back on a
+//! screen that explains itself.
 //!
-//! Must not: touch a single file in Desktop, Documents, Pictures, Videos or
-//! Music; touch another server's credentials or state; or delete anything the
-//! server holds. Disconnecting a computer is not a request to erase it.
+//! Must not: touch another server's credentials or state, or delete anything
+//! the server holds. Disconnecting a computer is not a request to erase it.
 
 use std::time::Duration;
 
@@ -60,18 +58,9 @@ const TRUST_CHECK_THROTTLE: Duration = Duration::from_secs(5);
 /// Emitted to the onboarding window when trust is lost.
 pub const DEVICE_REVOKED_EVENT: &str = "arciin://device-revoked";
 
-/// Emitted when the Arciin page asks for the native backup setup screen.
-pub const OPEN_BACKUP_SETUP_EVENT: &str = "arciin://open-backup-setup";
-
 /// Error codes that mean "this computer is no longer trusted".
-///
-/// `BACKUP_DEVICE_UNPAIRED` is included because the backup engine often
-/// notices first: it is the thing making requests continuously.
 pub fn is_trust_lost(code: &str) -> bool {
-    matches!(
-        code,
-        "DEVICE_REVOKED" | "DEVICE_INVALID" | "BACKUP_DEVICE_UNPAIRED"
-    )
+    matches!(code, "DEVICE_REVOKED" | "DEVICE_INVALID")
 }
 
 /// Tear down everything tied to one server after it stops trusting us.
@@ -88,24 +77,12 @@ pub fn handle_device_revoked(app: &AppHandle, server_id: &str) {
         return;
     };
 
-    // 1. Stop the backup engine (and, when it exists, its watchers). Done
-    //    first so nothing else starts a request with a dead credential.
-    state.backup.stop();
-
-    // 2. Drop the backup grant for this server only. Local files stay.
-    if let Err(err) = state
-        .backup
-        .forget_locally(app, state.credentials.as_ref(), server_id)
-    {
-        tracing::warn!(code = %err.code, "backup state could not be cleared");
-    }
-
-    // 3. Drop the device credential for this server only.
+    // 1. Drop the device credential for this server only.
     if let Err(err) = state.credentials.delete(server_id) {
         tracing::warn!(code = %err.code, "device credential could not be cleared");
     }
 
-    // 4. Keep the saved server, flagged, so the UI can explain what happened
+    // 2. Keep the saved server, flagged, so the UI can explain what happened
     //    and offer to pair again rather than the server silently vanishing.
     if let Ok(store) = ServerStore::new(app) {
         if let Err(err) = store.update(server_id, |server| server.revoked = true) {
@@ -113,10 +90,10 @@ pub fn handle_device_revoked(app: &AppHandle, server_id: &str) {
         }
     }
 
-    // 5. Forget the connection, so nothing native still thinks it is live.
+    // 3. Forget the connection, so nothing native still thinks it is live.
     *state.connection.lock().unwrap() = None;
 
-    // 6. Take down the Arciin window before it starts showing 401s, and put
+    // 4. Take down the Arciin window before it starts showing 401s, and put
     //    the onboarding window back with an explanation.
     connection::return_to_onboarding(app);
 
@@ -245,8 +222,8 @@ pub fn spawn_watchdog(app: &AppHandle, server_id: String, origin: url::Url) {
     });
 }
 
-/// Report a failure seen elsewhere (the backup engine, a reconnect) and run
-/// the disconnect flow if it means trust is gone.
+/// Report a failure seen elsewhere (a reconnect, say) and run the disconnect
+/// flow if it means trust is gone.
 ///
 /// Returns whether it was handled as a disconnect.
 pub fn report_failure(app: &AppHandle, server_id: &str, error: &AppError) -> bool {
@@ -263,11 +240,10 @@ mod tests {
 
     #[test]
     fn revocation_codes_are_recognised() {
-        // All three mean the same thing from three different vantage points:
-        // the pairing endpoint, the bootstrap, and the backup API.
+        // Both mean the same thing from two vantage points: the pairing
+        // endpoint and the bootstrap.
         assert!(is_trust_lost("DEVICE_REVOKED"));
         assert!(is_trust_lost("DEVICE_INVALID"));
-        assert!(is_trust_lost("BACKUP_DEVICE_UNPAIRED"));
     }
 
     #[test]
@@ -283,14 +259,6 @@ mod tests {
         ] {
             assert!(!is_trust_lost(code), "{code} must not disconnect anyone");
         }
-    }
-
-    #[test]
-    fn disabling_backup_is_not_a_revocation() {
-        // Backup being turned off leaves the computer paired. Treating it as a
-        // disconnect would force a needless re-pair.
-        assert!(!is_trust_lost("BACKUP_DISABLED"));
-        assert!(!is_trust_lost("BACKUP_CREDENTIAL_INVALID"));
     }
 
     #[test]
