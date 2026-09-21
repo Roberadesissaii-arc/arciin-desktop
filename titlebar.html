@@ -47,11 +47,52 @@
         -webkit-user-select: none;
       }
 
+      /* The shell's heading face, so the two lockups are the same lettering
+         and not merely the same words. */
+      @font-face {
+        font-family: "Space Grotesk";
+        src: url("./src/assets/fonts/SpaceGrotesk-VariableFont_wght.ttf")
+          format("truetype-variations");
+        font-weight: 300 700;
+        font-display: swap;
+      }
+
       .bar {
         display: flex;
         align-items: stretch;
         justify-content: flex-end;
         height: 100%;
+      }
+
+      /* Dragging by the logo moves the window, as it would on any title bar. */
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+        padding-left: 12px;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+
+      /* Scaled from the shell's 18x20 to sit inside a 26px bar. */
+      .brand__mark {
+        display: block;
+        width: 12px;
+        height: 14px;
+      }
+
+      .brand__word {
+        font-family: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        line-height: 1;
+        color: rgba(255, 255, 255, 0.92);
+      }
+
+      .brand__word span {
+        color: #ff4f12;
       }
 
       /* Everything left of the buttons drags the window, the way the empty
@@ -121,6 +162,31 @@
   </head>
   <body>
     <div class="bar">
+      <!--
+        The same lockup the onboarding shell shows at its top-left, so the
+        window is identifiably Arciin's before the server's page has painted
+        anything. White rather than near-black here because this band is the
+        sidebar's colour, which is how the web app draws it too.
+      -->
+      <div class="brand">
+        <svg
+          class="brand__mark"
+          viewBox="130 95 245 320"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <polyline
+            points="152,400 256,108 360,400"
+            fill="none"
+            stroke="#FF4F12"
+            stroke-width="70"
+            stroke-linejoin="round"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span class="brand__word">Arciin<span>.</span></span>
+      </div>
+
       <div class="drag"></div>
 
       <button id="minimize" type="button" title="Minimize" aria-label="Minimize">
