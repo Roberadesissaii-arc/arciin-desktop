@@ -4,21 +4,22 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
     />
     <title>Arciin window controls</title>
     <style>
       /*
-       * The window controls for the Arciin window.
+       * The title bar for the Arciin window.
        *
-       * They live in their own tiny webview, overlaid on the server's page,
+       * It lives in its own tiny webview, overlaid on the server's page,
        * because this client never injects script into a remote origin. The
        * page underneath belongs to the server; this strip belongs to us, and
        * the two never touch.
        *
        * Sized and shaped to match what Windows itself draws, so it reads as
-       * the system's chrome rather than a web widget: 46x32 hit targets, the
-       * same hover greys, and a close button that goes red.
+       * the system's chrome rather than a web widget: the app's own icon and
+       * name at the left where a window's identity goes, 46px hit targets at
+       * the right, the same hover greys, and a close button that goes red.
        */
       * {
         margin: 0;
@@ -45,17 +46,63 @@
         background: #09090b;
         user-select: none;
         -webkit-user-select: none;
+        /*
+         * Without this the name renders with subpixel antialiasing, which puts
+         * noticeably more weight on light text over a near-black ground than
+         * the same weight carries dark-on-light — and adds colour fringing.
+         * Both read as the bar being bolder and rougher than the rest of the
+         * application.
+         */
+        -webkit-font-smoothing: antialiased;
       }
 
       .bar {
         display: flex;
         align-items: stretch;
-        justify-content: flex-end;
         height: 100%;
       }
 
-      /* Everything left of the buttons drags the window, the way the empty
-         part of a real title bar does. */
+      /*
+       * The window's identity, where Windows puts it: icon then name, hard
+       * against the left edge.
+       *
+       * It is part of the drag region, because on a real title bar the area
+       * around the name is what you grab to move the window.
+       */
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+        padding-left: 11px;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+
+      /* The application icon itself — the same one on the taskbar and in the
+         Start menu, not a redrawn approximation of it. */
+      .brand__icon {
+        display: block;
+        width: 16px;
+        height: 16px;
+      }
+
+      /*
+       * Windows 11's own title bar face and size. The point is for this to be
+       * indistinguishable from the name Windows would have drawn here, so it
+       * deliberately does not use the product's display font.
+       */
+      .brand__name {
+        font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1;
+        white-space: nowrap;
+        color: rgba(255, 255, 255, 0.86);
+      }
+
+      /* Everything between the name and the buttons drags the window, the way
+         the empty part of a real title bar does. */
       .drag {
         flex: 1 1 auto;
         -webkit-app-region: drag;
@@ -94,8 +141,20 @@
         background: #b0271a;
       }
 
-      svg {
-        display: block;
+      /*
+       * The caption glyphs, from the font Windows draws its own with.
+       *
+       * Hand-drawn SVG shapes were what this used before, and they never quite
+       * passed: a plain square is not the maximize glyph, and the stroke
+       * weights did not match the system's at any size. Taking the real
+       * characters from the real font removes the question. `Segoe Fluent
+       * Icons` is Windows 11's; `Segoe MDL2 Assets` is the Windows 10 name for
+       * the same codepoints.
+       */
+      .glyph {
+        font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+        font-size: 10px;
+        line-height: 1;
       }
 
       /* Hidden until the maximize state is known, so the icon never flips
@@ -121,47 +180,27 @@
   </head>
   <body>
     <div class="bar">
+      <div class="brand">
+        <img class="brand__icon" src="./src-tauri/icons/32x32.png" alt="" />
+        <span class="brand__name">Arciin Desktop</span>
+      </div>
+
       <div class="drag"></div>
 
       <button id="minimize" type="button" title="Minimize" aria-label="Minimize">
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 5h10" stroke="currentColor" stroke-width="1" />
-        </svg>
+        <span class="glyph" aria-hidden="true">&#xE921;</span>
       </button>
 
       <button id="maximize" class="maximize" type="button" title="Maximize" aria-label="Maximize">
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <rect
-            x="0.5"
-            y="0.5"
-            width="9"
-            height="9"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1"
-          />
-        </svg>
+        <span class="glyph" aria-hidden="true">&#xE922;</span>
       </button>
 
       <button id="restore" class="restore" type="button" title="Restore" aria-label="Restore">
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <rect
-            x="0.5"
-            y="2.5"
-            width="7"
-            height="7"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1"
-          />
-          <path d="M2.5 2.5V0.5H9.5V7.5H7.5" fill="none" stroke="currentColor" stroke-width="1" />
-        </svg>
+        <span class="glyph" aria-hidden="true">&#xE923;</span>
       </button>
 
       <button id="close" class="close" type="button" title="Close" aria-label="Close">
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1" />
-        </svg>
+        <span class="glyph" aria-hidden="true">&#xE8BB;</span>
       </button>
     </div>
 
