@@ -25,9 +25,6 @@ pub struct VerifiedServer {
     pub protocol_version: u32,
     pub pairing_supported: bool,
     pub pairing_available: bool,
-    /// Whether this server can serve computer backup *and* speaks a version
-    /// this build implements. Negotiated, never assumed.
-    pub backup_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -42,11 +39,6 @@ impl VerifiedServer {
             protocol_version: manifest.protocol_version,
             pairing_supported: manifest.pairing_supported,
             pairing_available: manifest.pairing_available,
-            backup_supported: manifest
-                .capabilities
-                .as_ref()
-                .and_then(|c| c.computer_backup.as_ref())
-                .is_some_and(|c| c.usable()),
             version: manifest.version,
         }
     }
@@ -77,7 +69,6 @@ pub async fn verify_origin(origin: &Url) -> Result<VerifiedServer, AppError> {
         origin = %origin_string(origin),
         server_id = %server_id,
         protocol_version,
-        backup_supported = server.backup_supported,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "discovery manifest verified"
     );

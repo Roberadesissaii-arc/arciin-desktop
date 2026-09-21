@@ -11,7 +11,6 @@
 //! the desktop without a desktop release.
 
 pub mod address;
-pub mod backup;
 pub mod chrome;
 pub mod commands;
 pub mod connection;
@@ -29,26 +28,22 @@ use credentials::{CredentialStore, OsCredentialStore};
 
 /// The server this app is currently connected to.
 ///
-/// Backup commands need to know which server they are acting on, and they must
-/// never take that from the frontend: a renderer-supplied origin would let a
-/// page point native uploads somewhere else. It is recorded here by the
-/// connection flow, which is the only code that has verified it.
+/// Recorded by the connection flow, which is the only code that has verified
+/// it. Nothing takes a server's origin from the frontend: a renderer-supplied
+/// one would let a page point native requests somewhere else.
 #[derive(Debug, Clone)]
 pub struct ActiveConnection {
     pub server_id: String,
     pub origin: url::Url,
     pub device_id: String,
-    /// Whether this server advertised usable computer-backup support.
-    pub backup_supported: bool,
 }
 
 /// Process-wide state.
 ///
-/// Holds a handle to Windows Credential Manager (never a secret), the backup
+/// Holds a handle to Windows Credential Manager (never a secret) and the
 /// manager, and which server is connected.
 pub struct AppState {
     pub credentials: Arc<dyn CredentialStore>,
-    pub backup: Arc<backup::manager::BackupManager>,
     pub connection: std::sync::Mutex<Option<ActiveConnection>>,
     /// The webview showing the server's page.
     ///
@@ -135,7 +130,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             credentials: Arc::new(OsCredentialStore),
-            backup: Arc::new(backup::manager::BackupManager::new()),
             connection: std::sync::Mutex::new(None),
             content_webview: std::sync::Mutex::new(None),
         })
@@ -158,25 +152,6 @@ pub fn run() {
             commands::forget_server,
             commands::show_onboarding,
             commands::reveal_onboarding,
-            commands::backup_availability,
-            commands::backup_folders,
-            commands::backup_measure_folder,
-            commands::backup_pick_folder,
-            commands::backup_cancel_measuring,
-            commands::backup_enable,
-            commands::backup_state,
-            commands::backup_server_storage,
-            commands::backup_pause,
-            commands::backup_resume,
-            commands::backup_forget,
-            commands::backup_remove_root,
-            commands::backup_reenable,
-            commands::backup_resume_root,
-            commands::backup_resolve_safety_hold,
-            commands::backup_rescan,
-            commands::backup_open_root,
-            commands::close_backup_ui,
-            commands::size_for_backup_center,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arciin Desktop");

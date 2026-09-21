@@ -17,14 +17,13 @@
 //! Everything the server renders after this point is the server's own web
 //! application. The desktop deliberately contains no copy of it.
 
-pub mod bridge;
 pub mod trust;
 pub mod webview;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 use url::Url;
 
 use crate::address::{is_safe_external, is_same_origin};
@@ -189,45 +188,13 @@ pub async fn connect(
         server.last_connected_at = Some(chrono::Utc::now().to_rfc3339());
     })?;
 
-    // Recorded here, after verification, so backup commands never have to take
-    // a server identity from the frontend.
+    // Recorded here, after verification, so nothing native has to take a
+    // server identity from the frontend.
     if let Some(state) = app.try_state::<crate::AppState>() {
         *state.connection.lock().unwrap() = Some(crate::ActiveConnection {
             server_id: server_id.to_string(),
             origin: origin.clone(),
             device_id: session.device.id.clone(),
-            backup_supported: verified.backup_supported,
-        });
-    }
-
-    // Pick up a backup that was already set up on this computer.
-    //
-    // Without this the engine only ever ran in the session that turned backup
-    // on: every later launch left the queue sitting there uploading nothing,
-    // while the UI cheerfully reported the counts from the database. Creates
-    // nothing, so an interrupted first activation resumes rather than starting
-    // a second profile.
-    if verified.backup_supported {
-        let resume_handle = app.clone();
-        let resume_server = server_id.to_string();
-        let resume_origin = origin.clone();
-        tauri::async_runtime::spawn(async move {
-            let Some(state) = resume_handle.try_state::<crate::AppState>() else {
-                return;
-            };
-            let credentials = std::sync::Arc::clone(&state.credentials);
-            if let Err(err) = state
-                .backup
-                .resume_existing(
-                    &resume_handle,
-                    credentials.as_ref(),
-                    &resume_server,
-                    &resume_origin,
-                )
-                .await
-            {
-                tracing::warn!(code = %err.code, "computer backup could not resume");
-            }
         });
     }
 
@@ -239,7 +206,6 @@ pub async fn connect(
     tracing::info!(
         server_id,
         device_id = %session.device.id,
-        backup_supported = verified.backup_supported,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "connected"
     );
@@ -290,7 +256,6 @@ fn open_arciin_window(
     }
 
     let allowed = origin.clone();
-    let handle = app.clone();
     let probe_handle = app.clone();
     let probe_origin = origin.clone();
     let probe_server = server_id.to_string();
@@ -354,7 +319,7 @@ fn open_arciin_window(
             // where HTML5 hands it file contents and a name, which is all the
             // server's uploader needs.
             .disable_drag_drop_handler()
-            .on_navigation(move |url| guard_navigation(&handle, &allowed, url))
+            .on_navigation(move |url| guard_navigation(&allowed, url))
             .on_page_load(move |webview, payload| {
                 if payload.event() != tauri::webview::PageLoadEvent::Finished {
                     return;
@@ -480,26 +445,11 @@ fn layout_children(window: &tauri::Window) {
 /// an outbound link, a redirect to another host, and above all a
 /// `javascript:` or `data:` URL - is refused here. A genuine external web
 /// link is handed to the system browser instead of being dropped silently.
-fn guard_navigation(app: &AppHandle, allowed: &Url, target: &Url) -> bool {
+fn guard_navigation(allowed: &Url, target: &Url) -> bool {
     let target_str = target.as_str();
 
     if is_same_origin(allowed, target_str) {
         return true;
-    }
-
-    // The one thing the server's page may ask the shell to do. Handled here
-    // because the page's web message never reaches the native side under this
-    // WebView2 runtime; see `bridge::SENTINEL_SCHEME`.
-    //
-    // Safe to act on without checking an origin: this webview only ever hosts
-    // the trusted server, which is enforced by this very function.
-    if let Some(action) = bridge::classify_navigation(target) {
-        tracing::info!(?action, "native action accepted from the arciin page");
-        match action {
-            bridge::NativeAction::OpenComputerBackupSetup => open_backup_setup(app),
-        }
-        // Never navigates: the sentinel is a signal, not a destination.
-        return false;
     }
 
     if is_safe_external(target_str) {
@@ -588,40 +538,14 @@ pub fn spawn_visibility_guard(app: &AppHandle) {
     });
 }
 
-/// Bring the onboarding window forward on the folder-protection screen.
+/// Hand focus back to the Arciin window and hide onboarding.
 ///
-/// The Arciin window is left exactly as it is: not navigated, not reloaded.
-/// The user came from My Computers and should find it unchanged behind them.
-pub fn open_backup_setup(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(ONBOARDING_WINDOW) else {
-        return;
-    };
-
-    reveal_onboarding(app);
-    if let Err(err) = window.emit(trust::OPEN_BACKUP_SETUP_EVENT, ()) {
-        tracing::warn!(error = %err, "could not open the backup setup screen");
-        return;
-    }
-    tracing::info!("opened native backup setup from the arciin page");
-}
-
-/// Hide the native backup surface and hand focus back to Arciin.
-///
-/// # The bug this exists to fix
-///
-/// Backing out of the backup screens used to do nothing but change a React
-/// route. The onboarding window stayed on top showing its own status copy —
-/// "Arciin is open." / "Opening…" — while the real Arciin window sat alive
-/// behind it. It read as though the app had restarted and was reconnecting,
-/// when in fact nothing had happened at all.
-///
-/// So closing is a native operation, not a route change. The Arciin window is
-/// never touched beyond being shown and focused: same window, same webview,
-/// same session, same page. Nothing is rediscovered, re-paired or rebuilt.
-pub fn close_backup_ui(app: &AppHandle) {
+/// Onboarding is shown again during a reconnect, and closing it should return
+/// to the product rather than quit the application.
+fn return_to_arciin(app: &AppHandle) {
     let Some(arciin) = app.get_window(ARCIIN_WINDOW) else {
-        // No Arciin window to go back to — leave onboarding where it is
-        // rather than hiding the only thing on screen.
+        // Nothing to go back to - leave onboarding where it is rather than
+        // hiding the only thing on screen.
         tracing::info!("no arciin window to return to; leaving onboarding visible");
         return;
     };
@@ -637,25 +561,6 @@ pub fn close_backup_ui(app: &AppHandle) {
     }
 
     tracing::info!("returned to the existing arciin window");
-}
-
-/// Size the onboarding window for the backup surface it is about to show.
-///
-/// The first-run shell is a tall marketing layout; the Backup Center is a
-/// settings surface and wants to be wider and shorter. Resizing the window we
-/// already have avoids a second window with its own lifecycle.
-pub fn size_for_backup_center(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(ONBOARDING_WINDOW) else {
-        return;
-    };
-    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: 820.0,
-        // Sized so the one scrolling list shows about four rows once the
-        // fixed parts above and below it have taken their space. Still well
-        // inside a 1080-tall screen with the taskbar and caption.
-        height: 820.0,
-    }));
-    let _ = window.center();
 }
 
 /// Decide what closing a window means, once the app has more than one.
@@ -674,8 +579,6 @@ pub fn size_for_backup_center(app: &AppHandle) {
 ///   That is why stopping it needed `taskkill /F` — which skips WebView2's
 ///   cookie flush and silently threw away the signed-in session on every
 ///   restart, "Remember me" included.
-/// - **Back went to the wrong place.** Closing the native backup surface left
-///   onboarding visible showing its own status copy, which read as a restart.
 ///
 /// So closing is answered from application state rather than window state.
 /// Set once the app is on its way out.
@@ -737,7 +640,7 @@ pub fn attach_onboarding_lifecycle(app: &AppHandle) {
         // this *is* the app, and closing it should quit.
         if handle.get_window(ARCIIN_WINDOW).is_some() {
             api.prevent_close();
-            close_backup_ui(&handle);
+            return_to_arciin(&handle);
         }
     });
 }

@@ -23,8 +23,6 @@ import { DisconnectedScreen } from "@/features/connection/DisconnectedScreen"
 import { ManualScreen } from "@/features/discovery/ManualScreen"
 import { SearchScreen } from "@/features/discovery/SearchScreen"
 import { PairingScreen } from "@/features/pairing/PairingScreen"
-import { BackupCenterScreen } from "@/features/backup/BackupCenterScreen"
-import { ProtectFoldersScreen } from "@/features/backup/ProtectFoldersScreen"
 import * as ipc from "@/lib/ipc"
 import { useOnboarding } from "@/stores/onboarding"
 
@@ -32,10 +30,6 @@ export function App() {
   const step = useOnboarding((state) => state.step)
   const boot = useOnboarding((state) => state.boot)
   const deviceName = useOnboarding((state) => state.deviceName)
-  // The Backup Center lays itself out to the window and scrolls exactly one
-  // list inside itself, so the page must not scroll as well. Everything else
-  // is a short centred form that can scroll as a whole.
-  const fills = step === "backupCenter"
 
   useEffect(() => {
     void boot()
@@ -47,18 +41,6 @@ export function App() {
     let dispose: (() => void) | undefined
     void ipc.onDeviceRevoked((serverId) => {
       void useOnboarding.getState().deviceRevoked(serverId)
-    }).then((unlisten) => {
-      dispose = unlisten
-    })
-    return () => dispose?.()
-  }, [])
-
-  useEffect(() => {
-    // The one action the Arciin page may ask of us. Verified natively before
-    // it ever reaches here.
-    let dispose: (() => void) | undefined
-    void ipc.onOpenBackupSetup(() => {
-      void useOnboarding.getState().openBackupSetup()
     }).then((unlisten) => {
       dispose = unlisten
     })
@@ -77,8 +59,8 @@ export function App() {
     <div className="shell">
       <main className="shell__main">
         <Wordmark />
-        <div className={`shell__body${fills ? " shell__body--fill" : ""}`}>
-          <div className={`shell__content${fills ? " shell__content--fill" : ""}`}>
+        <div className="shell__body">
+          <div className="shell__content">
             <Step step={step} />
           </div>
         </div>
@@ -146,10 +128,6 @@ function Step({ step }: { step: ReturnType<typeof useOnboarding.getState>["step"
       return <ConnectingScreen />
     case "disconnected":
       return <DisconnectedScreen />
-    case "protectFolders":
-      return <ProtectFolders />
-    case "backupCenter":
-      return <BackupCenter />
     case "connected":
       // The Arciin window is in front; this one is hidden behind it. Keeping a
       // sane state here matters for when the user returns after a revocation.
@@ -160,26 +138,3 @@ function Step({ step }: { step: ReturnType<typeof useOnboarding.getState>["step"
       return <SearchScreen />
   }
 }
-
-/** The backup offer. Both exits return to the running Arciin window. */
-function ProtectFolders() {
-  const close = useOnboarding((state) => state.closeBackupUi)
-  return <ProtectFoldersScreen onDone={close} onSkip={close} />
-}
-
-/** Management for a computer that is already backing up. */
-function BackupCenter() {
-  const close = useOnboarding((state) => state.closeBackupUi)
-  const deviceName = useOnboarding((state) => state.deviceName)
-  return (
-    <BackupCenterScreen
-      deviceName={deviceName}
-      onClose={close}
-      // Backup stopped. The next visit comes back here, not to setup: the
-      // profile still exists on the server in a disabled state, and the
-      // Backup Center is what offers it back.
-      onStopped={close}
-    />
-  )
-}
-

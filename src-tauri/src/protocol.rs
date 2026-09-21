@@ -59,10 +59,6 @@ pub struct DiscoveryManifest {
     pub pairing_available: bool,
     #[serde(default)]
     pub web_url: Option<String>,
-    /// Optional. Absent on a server that predates computer backup, which must
-    /// keep working exactly as before.
-    #[serde(default)]
-    pub capabilities: Option<crate::backup::protocol::ServerCapabilities>,
 }
 
 /// Why a candidate address was not accepted as an Arciin server.

@@ -28,12 +28,8 @@ export type Step =
   | "connecting"
   /** The Arciin window is open; this one is hidden behind it. */
   | "connected"
-  /** Offering computer backup, after pairing and sign-in. */
-  | "protectFolders"
-  | "backupCenter"
   /** This computer was disconnected server-side. */
   | "disconnected"
-  /** Native backup status and settings. */
 
 /** Sub-states of "connecting", so the UI can name what is happening. */
 export type ConnectPhase = "verifying" | "authorizing" | "securing" | "opening"
@@ -72,17 +68,8 @@ type Actions = {
    * working reconnect never flashes the setup shell.
    */
   connect: (serverId: string, options?: { silent?: boolean }) => Promise<void>
-  /** Offer computer backup, if the server supports it and someone is signed in. */
-  offerBackup: () => Promise<void>
-  /** Dismiss the backup offer. Backup is optional. */
-  skipBackup: () => void
   /** The native layer detected that this computer is no longer trusted. */
   deviceRevoked: (serverId: string) => Promise<void>
-  /** Open the native backup status screen. */
-  /** Leave the native backup UI and return to the running Arciin window. */
-  closeBackupUi: () => void
-  /** The Arciin page asked for the folder-protection screen. */
-  openBackupSetup: () => Promise<void>
   forget: (serverId: string) => Promise<void>
   clearError: () => void
   reset: () => void
@@ -109,10 +96,9 @@ const initial: State = {
  * deliberately do not.
  */
 function ensureVisible() {
-  // Deliberately not latched. It used to be, which meant the backup UI could
-  // be opened exactly once per run: every later request set the route while
-  // the window stayed hidden, and nothing appeared. `reveal_onboarding` is a
-  // no-op when the window is already visible, so calling it is cheap.
+  // Deliberately not latched: `reveal_onboarding` is a no-op when the window
+  // is already visible, so calling it on every screen that needs a person is
+  // cheap, and a latch would mean the window could be shown only once per run.
   void ipc.revealOnboarding()
 }
 
@@ -258,68 +244,9 @@ export const useOnboarding = create<State & Actions>((set, get) => ({
     }
   },
 
-  async offerBackup() {
-    try {
-      const availability = await ipc.backupAvailability()
-      // Three conditions, all required: the server can do backup, a person is
-      // signed in to authorize it, and it is not already set up here.
-      if (availability.supported && availability.signedIn && !availability.enabled) {
-        ensureVisible()
-        set({ step: "protectFolders", error: null })
-      }
-    } catch {
-      // Backup is an optional extra; failing to offer it must never disturb a
-      // working connection.
-    }
-  },
-
-  skipBackup() {
-    set({ step: "connected" })
-  },
-
-  /**
-   * Open the native backup UI, choosing the screen from real profile state.
-   *
-   * The server's sentinel is named `.../backup/setup`, but it means "open the
-   * backup UI", not "always show the wizard". Someone whose backup has run for
-   * weeks must not be handed first-run setup — that reads as though their
-   * configuration had been lost.
-   */
-  async openBackupSetup() {
-    ensureVisible()
-    try {
-      const state = await ipc.backupState()
-      // An existing profile belongs in the Backup Center whatever state it is
-      // in — running, in error, or switched off. An error is something to see
-      // there, not a reason to set up again, and backup being *off* is the
-      // case this routing exists for: sending someone who stopped backup back
-      // through first-run setup is how a second tree gets built on the server.
-      // Only a genuinely absent profile opens the wizard.
-      set({
-        step: state.lifecycle === "NOT_SET_UP" ? "protectFolders" : "backupCenter",
-        error: null,
-      })
-    } catch {
-      set({ step: "protectFolders", error: null })
-    }
-  },
-
-  /**
-   * Leave the native backup UI.
-   *
-   * Native, not just a route change: the old version only set the step, so the
-   * onboarding window stayed on top of a perfectly healthy Arciin window
-   * showing its own status copy, which read as a restart.
-   */
-  closeBackupUi() {
-    set({ step: "connected" })
-    void ipc.closeBackupUi()
-  },
-
   async deviceRevoked(serverId) {
-    // The native side has already stopped backup and cleared this server's
-    // credentials. All that is left is to say so, and to name the server if we
-    // still know it.
+    // The native side has already cleared this server's credentials. All that
+    // is left is to say so, and to name the server if we still know it.
     const saved = await ipc.savedServers().catch(() => get().saved)
     const server = saved.find((entry) => entry.serverId === serverId)
     ensureVisible()

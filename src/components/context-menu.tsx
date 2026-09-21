@@ -4,8 +4,8 @@
  * WebView2 ships a *browser* context menu, and without this it is what a
  * right-click in Arciin Desktop produces: Back, Refresh, Save as, Print, More
  * tools. In a product window those are wrong in every direction — "Save as"
- * offers to write the Backup Center out as a web page, "Refresh" reloads it,
- * and "More tools" leads to developer tools. Worse, the one thing a person
+ * offers to write a settings screen out as a web page, and "More tools" leads
+ * to developer tools. Worse, the one thing a person
  * actually right-clicks a text field for — paste — is not on it at all, which
  * is why it reads as "right-click does nothing".
  *
