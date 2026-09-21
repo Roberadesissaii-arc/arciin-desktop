@@ -45,6 +45,14 @@
         background: #09090b;
         user-select: none;
         -webkit-user-select: none;
+        /*
+         * The shell sets this on its own body, and without it here the two
+         * lockups do not match: subpixel antialiasing renders light text on a
+         * near-black ground noticeably heavier than the same weight renders
+         * dark-on-light, and its colour fringing is what reads as the mark
+         * looking rough.
+         */
+        -webkit-font-smoothing: antialiased;
       }
 
       /* The shell's heading face, so the two lockups are the same lettering
@@ -75,11 +83,21 @@
         app-region: drag;
       }
 
-      /* Scaled from the shell's 18x20 to sit inside a 26px bar. */
+      /*
+       * Scaled from the shell's 18x20 to sit inside a 26px bar, keeping the
+       * shell's ratio of mark height to wordmark size (20:17) so the arch does
+       * not read as heavier beside smaller lettering than it does up there.
+       *
+       * `geometricPrecision` matters at this size: the arch is a 70-unit
+       * stroke in a 245-unit viewBox, which lands on about three physical
+       * pixels, and the default speed-first rasterisation makes its apex
+       * visibly blocky.
+       */
       .brand__mark {
         display: block;
         width: 12px;
-        height: 14px;
+        height: 15px;
+        shape-rendering: geometricPrecision;
       }
 
       .brand__word {
